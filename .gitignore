@@ -16,6 +16,8 @@ htmlcov/
 .idea/
 .vscode/
 
-# Trained Q-tables
-qtable*.json
+# 训练产物（models/agent.pt 是随仓库提供的基线权重，单独放行）
+models/*.pt
+!models/agent.pt
 runs/
+*.log

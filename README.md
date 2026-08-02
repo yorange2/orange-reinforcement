@@ -1,146 +1,169 @@
 # orange-reinforcement
 
-A small, dependency-free reinforcement learning project: a tabular **Q-learning**
-agent that learns to cross a grid world, reach the goal, and avoid the pits.
+从零实现三人**跑得快**，再用强化学习训练一个策略网络，去打赢手写的规则算法。
 
-Pure Python standard library — no NumPy, no Gym, no install step. The whole thing
-is about 300 lines, so it's readable end to end.
+牌型、引擎、规则对手、特征、训练、人机对战全都在这个仓库里，没有外部游戏环境依赖，
+只需要 `torch` 和 `numpy`。
 
-## Quick start
+## 效果
+
+每格 1500 局，轮转座位抵消 ♦3 的先手优势，同一批牌局横向可比。**三家游戏的随机基准是 33.3%**：
+
+| 选手 | vs 2×random | vs 2×greedy | vs 2×rule |
+| --- | --- | --- | --- |
+| **模型（本项目）** | **87.4%** | **74.3%** | **51.3%** |
+| rule（最强的手写算法） | 78.4% | 64.9% | 34.9% |
+| greedy | 65.3% | 34.7% | 13.7% |
+| random | 32.1% | 12.0% | 7.0% |
+
+关键一格是右下角：模型在两个 `rule` 机器人中间能拿到 **51.3%**，而 `rule` 自己坐同一个位置只有
+34.9%（即基准线）。也就是说模型不只是"会打牌"，是确实**打赢了造它的那个启发式算法**。
+
+对角线上同类打同类都落在 33% 附近（34.7% / 34.9% / 32.1%），说明评测口径没有系统性偏差。
+
+训练过程（12 万局，CPU 上约 4.5 分钟，约 470 局/秒）：
+
+```
+第  10000 局  近 10000 局胜率  30.7%
+第  40000 局  近 10000 局胜率  43.6%
+第  80000 局  近 10000 局胜率  44.9%
+第 120000 局  近 10000 局胜率  47.8%
+```
+
+（训练时的胜率低于评测胜率，因为训练在按概率采样动作以保持探索，评测走贪心。）
+
+## 快速开始
 
 ```bash
 git clone https://github.com/yorange2/orange-reinforcement.git
 cd orange-reinforcement
-python3 train.py
+
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+.venv/bin/python bench.py --model models/agent.pt   # 复现上面那张表
+.venv/bin/python play.py --model models/agent.pt    # 自己上手跟模型打一局
+.venv/bin/python train.py                           # 重新训练
 ```
 
-Output:
+仓库里带了一份训练好的权重 `models/agent.pt`（95 KB），可以直接用。
+
+## 游戏规则
+
+采用常见的三人 16 张变体：
+
+- **牌堆**：54 张去掉大小王和四个 2，剩 **48 张**，每人 16 张。
+- **大小**：3 < 4 < … < 10 < J < Q < K < A。没有 2 和王，所以顺子不用处理回绕。
+- **先手**：谁摸到 ♦3 谁先出，且**第一手必须包含 ♦3**。
+- **跟牌**：同牌型、同长度、点数更大才能压；跟不起或不想跟就"过"；其余两家都过之后，
+  最后出牌的人重新自由出牌。
+- **牌型**：单张、对子、三张、三带一、三带二、顺子（≥5 张）、连对（≥2 对）、
+  飞机（≥2 个连续三张，可带单或带对）、炸弹（四张同点，压任何非炸弹，炸弹之间比点数）。
+- **胜负**：先出完手牌的人赢。
+
+（`combos.py` 顶部写清了本项目采纳的每条细则，换变体改那里即可。）
+
+## 强化学习是怎么做的
+
+### 难点：动作空间是变长的
+
+跑得快每一步的合法出牌数量都不一样——本项目实测**平均 40 个、最多 80 多个**，而且
+同一个"动作"（比如"出一个对子"）在不同手牌下含义完全不同。用固定动作头的 DQN 会很别扭。
+
+### 做法：逐动作打分，只在合法动作上归一化
 
 ```
-Grid world (S start, G goal, X pit, # wall)
-A . . . .
-. # # . X
-. . . . #
-. # X . .
-. . # . G
-
-Training for 500 episodes...
-
-episode   100  avg reward  -27.54  epsilon 0.366
-episode   200  avg reward    4.95  epsilon 0.134
-episode   300  avg reward   10.26  epsilon 0.049
-episode   400  avg reward   11.43  epsilon 0.018
-episode   500  avg reward   11.89  epsilon 0.010
-
-Learned policy (greedy action per visited cell)
-> > > v <
-v # # v X
-> > > v #
-> # X v v
-< > # > G
-
-First 100 episodes: avg reward -27.54
-Last  100 episodes: avg reward 11.89
-
-Greedy run: goal in 8 steps, total reward 12.0
-Path: (0, 0) -> (0, 1) -> (0, 2) -> (0, 3) -> (1, 3) -> (2, 3) -> (3, 3) -> (4, 3) -> (4, 4)
+score_i = f(特征(局面, 动作_i))     # 所有候选共享同一个打分网络
+π(动作_i) = softmax(score)_i        # 只在当前合法的候选里归一化
 ```
 
-The agent starts out wandering into pits (average reward `-27`), and after a few
-hundred episodes walks the shortest safe route in 8 steps — the optimal path.
+这样合法动作有几个都无所谓，而且没见过的牌型组合也能靠特征泛化。网络是个 40→128→128→1
+的 MLP，训练用**带基线的 REINFORCE**：优势 = 折扣回报 − V(局面)，V 由一个小价值网络估计，
+优势做批内标准化，再加一点熵奖励维持探索。
 
-## The environment
+### 回报设计
 
-| Symbol | Meaning | Reward |
-| ------ | ------- | ------ |
-| `S`    | start   | — |
-| `G`    | goal, ends the episode | `+20` |
-| `X`    | pit, ends the episode | `-20` |
-| `#`    | wall, blocks movement | — |
-| any move | | `-1` per step |
+赢了 +1；输了按剩牌给 `-剩余张数/16`。比纯 ±1 学得快——输的时候剩 1 张和剩 12 张
+显然不是一回事，这个稠密一点的信号让模型更快学会"先把手牌拆干净"。
 
-Four actions: up, down, left, right. Movement is deterministic; bumping into a
-wall or the border wastes a step. Episodes also end after `--max-steps` moves.
+### 特征（40 维）
 
-The step penalty is what makes the agent prefer *short* routes — without it,
-any path to the goal would look equally good.
+前 26 维描述**候选动作**，后 14 维描述**局面**（同一决策点里对所有候选相同）：
 
-## How it works
+- 动作：牌型 one-hot、点数、张数、连长、是不是炸弹、是不是"过"、**出完之后手牌还剩几轮能走完**、
+  这一手把手里的对子/三张/炸弹拆散了几组、带牌张数、比这手大的牌在暗牌里占多少比例、出完是不是就赢了。
+- 局面：自己剩几张、对手各剩几张、有没有人只剩 ≤2 张、当前要压什么、合法动作有几个、
+  当前牌面是不是自己打的。
 
-Q-learning keeps a table `Q[state][action]` estimating the total future reward of
-taking an action in a state. After each move it nudges that estimate towards what
-it just observed:
+其中"**还剩几轮能走完**"（`estimate_turns`）是最关键的一个：贪心把手牌拆成顺子/连对/炸弹/
+三带一等等，数需要几轮出完。它给了网络一个"这一手把牌拆坏了没有"的直接信号。这个函数按
+点数签名做了 LRU 缓存，否则训练时每步要重算几十次。
+
+## 三个手写的规则对手
+
+它们既是训练对手，也是衡量模型强弱的标尺：
+
+| 名字 | 打法 |
+| --- | --- |
+| `random` | 合法动作里均匀随机，纯基准线 |
+| `greedy` | 能压就压，永远出最便宜的牌；不留大牌、不管对手还剩几张 |
+| `rule` | 会算手牌拆解：优先出拆得最干净的一手、保留炸弹、不用 K/A 去压小牌、对手只剩 ≤2 张时改用大牌压制、能一把走完立刻走 |
+
+`rule` 是个相当像样的对手——它打 `greedy` 有 64.9%，打 `random` 有 78.4%。
+
+## 目录结构
 
 ```
-Q(s, a) <- Q(s, a) + alpha * (r + gamma * max_a' Q(s', a') - Q(s, a))
+paodekuai/
+  cards.py      牌、花色、发牌
+  combos.py     牌型识别、比大小、合法出牌枚举、手牌拆解估计
+  game.py       引擎：♦3 先手、跟牌、过牌、重新领出、判胜负
+  bots.py       三个手写规则对手
+  features.py   (局面, 动作) -> 40 维特征
+  policy.py     打分网络、价值网络、REINFORCE 智能体、存取权重
+  arena.py      对局评测与胜率统计
+train.py        训练脚本（含定期评测）
+bench.py        统一口径的胜率基准表
+play.py         人机对战 / 观战
+tests/          85 个单元测试
+models/agent.pt 训练好的权重
 ```
 
-- `alpha` (learning rate) — how much each new experience overwrites the old estimate.
-- `gamma` (discount) — how much distant rewards count relative to immediate ones.
-- `epsilon` (exploration) — probability of a random action instead of the best known
-  one. It starts at `1.0` (pure exploration) and decays each episode towards `0.01`,
-  so the agent explores early and exploits what it learned later.
-
-## Options
+## 常用命令
 
 ```bash
-python3 train.py --episodes 2000        # train longer
-python3 train.py --alpha 0.5            # learn faster (and less stably)
-python3 train.py --gamma 0.8            # care less about distant rewards
-python3 train.py --epsilon-decay 0.999  # explore for longer
-python3 train.py --seed 7               # different random run
-python3 train.py --save qtable.json     # persist the trained Q-table
-python3 train.py --help                 # everything else
+# 训练：换对手、调超参
+.venv/bin/python train.py --episodes 120000 --opponent rule --batch 32 --lr 7e-4
+.venv/bin/python train.py --opponent mix          # 每局随机抽两个不同对手，更耐打
+.venv/bin/python train.py --save models/mine.pt
+.venv/bin/python train.py --help
+
+# 评测
+.venv/bin/python bench.py --model models/agent.pt --games 3000
+
+# 对战 / 观战
+.venv/bin/python play.py --opponent rule          # 你 vs 2 个规则机器人
+.venv/bin/python play.py --opponent model --model models/agent.pt
+.venv/bin/python play.py --watch --model models/agent.pt   # 只看机器互打
 ```
 
-## Use it as a library
-
-```python
-from orange_rl import GridWorld, QLearningAgent
-
-env = GridWorld(["S..", ".#X", "..G"])          # your own map
-agent = QLearningAgent(n_actions=env.n_actions, seed=0)
-
-for _ in range(300):
-    state, done = env.reset(), False
-    while not done:
-        action = agent.act(state)
-        next_state, reward, done, info = env.step(action)
-        agent.learn(state, action, reward, next_state, done)
-        state = next_state
-    agent.decay_epsilon()
-
-print(agent.policy(env.states()))                # greedy action per state
-```
-
-`GridWorld` follows the familiar `reset()` / `step(action) -> (state, reward, done, info)`
-interface, and `QLearningAgent` works with any hashable state — so you can point
-either half at something else.
-
-## Layout
-
-```
-orange_rl/
-  gridworld.py     # the environment: layout parsing, movement, rewards, rendering
-  q_learning.py    # the agent: Q-table, epsilon-greedy policy, updates, save/load
-train.py           # training loop, greedy evaluation, policy rendering, CLI
-tests/             # unit tests for both halves, plus a learning-convergence test
-```
-
-## Tests
+## 测试
 
 ```bash
-python3 -m unittest discover -s tests -t .
+.venv/bin/python -m unittest discover -s tests -t .
 ```
 
-21 tests, no dependencies. The last one trains a real agent for 500 episodes and
-asserts it actually reaches the goal and improves over time.
+85 个测试，约 1.6 秒。除了常规的牌型和引擎规则，有两个值得一提：
 
-## Ideas to extend it
+- **牌型往返一致性**：随机发几百手牌，枚举出的每一个合法动作都要能被 `classify()`
+  反向识别成同样的牌型、点数和连长——生成器和识别器互相验证。
+- **规则对手强弱梯度**：断言 `rule > greedy > random`，并且同类打同类必须落在 33.3% 附近。
+  这条测试挂了，说明评测口径出了问题，模型胜率也就没有意义了。
 
-- **SARSA** — swap `max_a' Q(s', a')` for the Q-value of the action actually taken.
-- **Stochastic moves** — make actions slip sideways with some probability; the
-  agent should learn to give pits a wider berth.
-- **Bigger or random maps** — `GridWorld` takes any layout, so generate one.
-- **Function approximation** — replace the Q-table with a linear model or a small
-  network once the state space gets too big to enumerate.
+## 可以继续做的事
+
+- **换 PPO**：现在是带基线的 REINFORCE，样本效率还有明显提升空间。
+- **自我对弈**：目前只对规则对手训练，容易学成"专门克制这几个机器人"。自我对弈 + 对手池
+  会更通用。
+- **补全信息利用**：现在只用了公开信息，可以加对手手牌的概率推断。
+- **换变体**：连对最少几对、飞机怎么带、要不要保留 2 和王，都在 `combos.py` 顶部集中定义。
