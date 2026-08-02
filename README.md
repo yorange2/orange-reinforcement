@@ -103,8 +103,12 @@ python3 -m venv .venv
 
 .venv/bin/python bench.py --model models/agent.pt   # 复现上面那张表
 .venv/bin/python play.py --model models/agent.pt    # 自己上手跟模型打一局
-.venv/bin/python train.py                           # 重新训练
+.venv/bin/python train.py                           # 训练（默认 2000 局，约 8 秒）
 ```
+
+> **默认训练局数是 2000（约 8 秒）**，刻意压得很小：探索阶段要的是快速看方向对不对。
+> 这个预算下对 2×rule 已经能打到约 44~49%，而 `rule` 自己只有 33%。上面表里那组数字来自
+> 12 万局的正式对照实验（PPO 约 4 分钟），要复现加 `--episodes 120000` 即可。
 
 仓库里带了训练好的权重 `models/agent.pt`（94 KB，即下面对照实验里的 PPO 22k），可以直接用。
 
@@ -214,8 +218,9 @@ models/reinforce_big.pt    REINFORCE, 3 层 x 512 宽, 54.7 万参数
 ## 常用命令
 
 ```bash
-# 训练：换算法、换对手、调超参、改模型大小
-.venv/bin/python train.py --episodes 120000 --opponent rule --batch 32 --lr 7e-4
+# 训练：默认只跑 2000 局（约 8 秒），够快速验证一个想法
+.venv/bin/python train.py
+.venv/bin/python train.py --episodes 120000 --batch 32 --lr 7e-4   # 出正式结果再拉长
 .venv/bin/python train.py --algo reinforce           # 切回 REINFORCE 做对照
 .venv/bin/python train.py --hidden 512 --layers 3 --save models/big.pt   # 更大的模型
 .venv/bin/python train.py --opponent mix          # 每局随机抽两个不同对手，更耐打

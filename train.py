@@ -2,9 +2,12 @@
 """训练一个跑得快智能体，目标是打赢人为构造的规则算法。
 
 用法：
-    python train.py                                  # 默认对 rule 机器人训练
-    python train.py --episodes 20000 --opponent mix  # 训练更久、对手随机混合
-    python train.py --save models/agent.pt           # 保存权重
+    python train.py                                  # 默认 PPO 跑 2000 局，几秒钟出结果
+    python train.py --episodes 120000                # 要正式结果时再拉长
+    python train.py --opponent mix --save models/agent.pt
+
+默认局数刻意压得很小：探索阶段要的是快速看方向对不对。PPO 跑 2000 局对 2xrule 就有约 49%
+（跑满 12 万局也才 51%），足够判断一个改动有没有效果。
 """
 
 from __future__ import annotations
@@ -136,7 +139,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--episodes", type=int, default=8000, help="训练局数（默认 8000）")
+    parser.add_argument("--episodes", type=int, default=2000,
+                        help="训练局数（默认 2000，够快速验证一个想法；出正式结果再拉长）")
     parser.add_argument("--algo", default="ppo", choices=["ppo", "reinforce"],
                         help="训练算法（默认 ppo）")
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO 每批数据重复训练几轮")
@@ -152,9 +156,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--value-coef", type=float, default=0.5, help="价值损失系数")
     parser.add_argument("--clip", type=float, default=5.0, help="梯度裁剪阈值")
     parser.add_argument("--log-every", type=int, default=500, help="多少局打印一次训练胜率")
-    parser.add_argument("--eval-every", type=int, default=2000, help="多少局评测一次（0 表示不评）")
+    parser.add_argument("--eval-every", type=int, default=0, help="多少局评测一次（0 表示不评）")
     parser.add_argument("--eval-games", type=int, default=300, help="每次评测打多少局")
-    parser.add_argument("--final-eval-games", type=int, default=1000, help="训练结束后的评测局数")
+    parser.add_argument("--final-eval-games", type=int, default=500, help="训练结束后的评测局数")
     parser.add_argument("--device", default="cpu", help="cpu / mps / cuda")
     parser.add_argument("--quiet", action="store_true", help="不打印训练过程")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
