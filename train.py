@@ -24,6 +24,7 @@ import torch.nn.functional as F
 
 from paodekuai.arena import evaluate_all, final_reward, format_table
 from paodekuai.bots import make_bot
+from paodekuai.encoding import ENCODERS, make_encoder
 from paodekuai.game import play_game
 from paodekuai.policy import (NORMS, MoveScorer, PolicyAgent, Step, ValueNet,
                               discounted_returns, evaluate_batch, make_batch,
@@ -105,15 +106,22 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     rng = random.Random(args.seed)
     device = torch.device(args.device)
 
-    scorer = MoveScorer(hidden=args.hidden, layers=args.layers, norm=args.norm).to(device)
+    encoder = make_encoder(args.features)
+    grid = encoder.grid_slice if args.conv else None
+    scorer = MoveScorer(dim=encoder.dim, hidden=args.hidden, layers=args.layers,
+                        norm=args.norm, grid=grid).to(device)
+    scorer.encoder_name = encoder.name
     if not args.quiet:
+        print(f"输入: {encoder.name} 编码 {encoder.dim} 维"
+              f"{'，点数网格走卷积' if grid else ''}")
         print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}，"
               f"共 {scorer.n_params:,} 个参数")
-    value = ValueNet(norm=args.norm).to(device)
+    value = ValueNet(dim=encoder.state_dim, norm=args.norm).to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
     )
-    agent = PolicyAgent(scorer, value, device=device, training=True, seed=args.seed)
+    agent = PolicyAgent(scorer, value, device=device, training=True, seed=args.seed,
+                        encoder=encoder)
 
     pool = None
     if args.opponent == "self":
@@ -145,7 +153,8 @@ def train(args: argparse.Namespace) -> PolicyAgent:
             batch_returns.append(discounted_returns(reward, len(steps), args.gamma))
 
         if episode % args.batch == 0 and batch_steps:
-            _update(optimizer, scorer, value, batch_steps, batch_returns, args, device)
+            _update(optimizer, scorer, value, batch_steps, batch_returns, args, device,
+                    encoder.state_offset)
             batch_steps, batch_returns = [], []
 
         if not args.quiet and episode % args.log_every == 0:
@@ -165,14 +174,14 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     return agent
 
 
-def _update(optimizer, scorer, value_net, steps, returns, args, device) -> None:
+def _update(optimizer, scorer, value_net, steps, returns, args, device, state_offset) -> None:
     """用一批轨迹更新一次网络。两种算法只差在策略损失和更新轮数上。
 
     REINFORCE：优势 x log π，一批数据只用一轮。
     PPO：看新旧策略在这个动作上的概率比 r，把 r 裁剪到 [1-ε, 1+ε] 再取较小的那项。
          裁剪相当于给更新幅度上了保险，所以同一批数据可以安全地反复用好几轮。
     """
-    batch = make_batch(steps, device)
+    batch = make_batch(steps, device, state_offset)
     target = torch.from_numpy(np.concatenate(returns)).to(device)
 
     # 优势只算一次，用的是更新前的价值估计（PPO 的标准做法）
@@ -225,6 +234,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
     parser.add_argument("--hidden", type=int, default=128, help="打分网络隐藏层宽度")
     parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
+    parser.add_argument("--features", default="handcrafted", choices=list(ENCODERS),
+                        help="输入编码：handcrafted=手工特征，raw=原始点数网格，both=两者拼接")
+    parser.add_argument("--conv", action="store_true",
+                        help="原始编码的点数网格走一维卷积（慢 30 倍以上，默认展平进 MLP）")
     parser.add_argument("--norm", default="layer", choices=list(NORMS),
                         help="隐藏层归一化方式（默认 layer=LayerNorm；不提供 BatchNorm，原因见 policy.py）")
     parser.add_argument("--batch", type=int, default=16, help="多少局更新一次")

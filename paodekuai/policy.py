@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from .features import FEATURE_DIM, STATE_OFFSET, batch_features
+from .features import FEATURE_DIM, STATE_OFFSET
 from .game import Action, Observation
 
 STATE_DIM = FEATURE_DIM - STATE_OFFSET
@@ -49,24 +49,57 @@ def make_norm(norm: str, width: int) -> List[nn.Module]:
 
 
 class MoveScorer(nn.Module):
-    """给单个候选动作打分。输入 (动作数, FEATURE_DIM)，输出 (动作数,)。
+    """给单个候选动作打分。输入 (动作数, dim)，输出 (动作数,)。
 
     `hidden` 是隐藏层宽度，`layers` 是隐藏层数量，一起决定模型大小。
+
+    传 `grid` 就会先用一维卷积沿点数轴扫一遍再进 MLP：顺子和连对本来就是点数轴上的
+    连续片段，卷积适合发现这种局部模式。但**默认不开**——实测在 PPO 更新的批量规模上
+    （6.4 万行）卷积要 508ms，展平直接进 MLP 只要 16ms，慢 32 倍，训练吞吐从 380 局/秒
+    掉到 27 局/秒。这个任务的点数轴只有 12 格，不值这个代价。
     """
 
     def __init__(
-        self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2, norm: str = "layer"
+        self,
+        dim: int = FEATURE_DIM,
+        hidden: int = 128,
+        layers: int = 2,
+        norm: str = "layer",
+        grid: Optional[Tuple[int, int]] = None,
+        grid_channels: int = 6,
+        conv_channels: int = 32,
     ) -> None:
         super().__init__()
         if layers < 1:
             raise ValueError("至少要有一层隐藏层")
 
+        self.dim = dim
         self.hidden = hidden
         self.layers = layers
         self.norm = norm
+        self.grid = grid
+        self.grid_channels = grid_channels
+        self.conv_channels = conv_channels
+
+        mlp_in = dim
+        self.conv = None
+        if grid is not None:
+            start, end = grid
+            n_ranks = (end - start) // grid_channels
+            if n_ranks * grid_channels != end - start:
+                raise ValueError(f"网格区间 {grid} 装不下 {grid_channels} 个通道")
+            self.n_ranks = n_ranks
+            self.conv = nn.Sequential(
+                nn.Conv1d(grid_channels, conv_channels, kernel_size=5, padding=2),
+                nn.ReLU(),
+                nn.Conv1d(conv_channels, conv_channels, kernel_size=3, padding=1),
+                nn.ReLU(),
+            )
+            # 网格换成卷积输出，其余维度原样拼在后面
+            mlp_in = dim - (end - start) + conv_channels * n_ranks
 
         blocks: List[nn.Module] = []
-        in_dim = dim
+        in_dim = mlp_in
         for _ in range(layers):
             blocks.append(nn.Linear(in_dim, hidden))
             blocks.extend(make_norm(norm, hidden))
@@ -80,6 +113,11 @@ class MoveScorer(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.conv is not None:
+            start, end = self.grid
+            grid = x[:, start:end].reshape(-1, self.grid_channels, self.n_ranks)
+            encoded = self.conv(grid).flatten(1)
+            x = torch.cat([x[:, :start], encoded, x[:, end:]], dim=1)
         return self.net(x).squeeze(-1)
 
 
@@ -138,7 +176,11 @@ class PolicyAgent:
         temperature: float = 1.0,
         seed: Optional[int] = None,
         sample: bool = False,
+        encoder=None,
     ) -> None:
+        from .encoding import make_encoder
+
+        self.encoder = encoder if encoder is not None else make_encoder("handcrafted")
         self.scorer = scorer
         self.value = value
         self.device = torch.device(device)
@@ -155,7 +197,7 @@ class PolicyAgent:
             # 只有一个选择时不产生梯度：这种决策点学不到东西，还会稀释信号
             return obs.legal[0]
 
-        x = torch.from_numpy(batch_features(obs)).to(self.device)
+        x = torch.from_numpy(self.encoder.build(obs)).to(self.device)
 
         with torch.no_grad():  # 采样不需要梯度，梯度在更新时重新前向来算
             scores = self.scorer(x) / self.temperature
@@ -176,7 +218,8 @@ class PolicyAgent:
 
     def eval_agent(self, temperature: float = 1.0) -> "PolicyAgent":
         """复制一个只做贪心决策、不记录轨迹的版本，用于评测。"""
-        return PolicyAgent(self.scorer, None, self.device, training=False, temperature=temperature)
+        return PolicyAgent(self.scorer, None, self.device, training=False,
+                           temperature=temperature, encoder=self.encoder)
 
 
 def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, meta: Optional[dict] = None) -> None:
@@ -192,7 +235,9 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
             "hidden": scorer.hidden,
             "layers": scorer.layers,
             "norm": scorer.norm,
-            "feature_dim": FEATURE_DIM,
+            "encoder": getattr(scorer, "encoder_name", "handcrafted"),
+            "conv": scorer.grid is not None,
+            "feature_dim": scorer.dim,
             "meta": meta or {},
         },
         path,
@@ -201,19 +246,25 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
 
 def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
     """读取模型，返回可以直接对局的智能体。"""
+    from .encoding import make_encoder
+
     blob = torch.load(path, map_location=device, weights_only=False)
-    if blob["feature_dim"] != FEATURE_DIM:
+    encoder = make_encoder(blob.get("encoder", "handcrafted"))
+    if blob["feature_dim"] != encoder.dim:
         raise ValueError(
-            f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维，"
-            "特征改过了就得重训"
+            f"模型是用 {blob['feature_dim']} 维输入训练的，当前 {encoder.name} 编码是 "
+            f"{encoder.dim} 维，编码改过了就得重训"
         )
-    # layers / norm 都是后加的字段，早期存的权重按当时的默认值来
+    # layers / norm / encoder 都是后加的字段，早期存的权重按当时的默认值来
     scorer = MoveScorer(
-        hidden=blob["hidden"], layers=blob.get("layers", 2), norm=blob.get("norm", "none")
+        dim=encoder.dim, hidden=blob["hidden"], layers=blob.get("layers", 2),
+        norm=blob.get("norm", "none"),
+        grid=encoder.grid_slice if blob.get("conv", False) else None,
     ).to(device)
+    scorer.encoder_name = encoder.name
     scorer.load_state_dict(blob["scorer"])
     scorer.eval()
-    return PolicyAgent(scorer, device=device, training=False)
+    return PolicyAgent(scorer, device=device, training=False, encoder=encoder)
 
 
 @dataclass
@@ -224,22 +275,28 @@ class Batch:
     屏蔽掉——softmax 前填 -inf，它们的概率恒为 0，不会污染梯度。
     """
 
-    features: torch.Tensor   # (S, M, FEATURE_DIM)
+    features: torch.Tensor   # (S, M, dim)
     mask: torch.Tensor       # (S, M) bool，True 表示是真实候选
     actions: torch.Tensor    # (S,)
     old_log_probs: torch.Tensor  # (S,)
+    state_offset: int        # 局面块从这里开始，价值网络只吃这一段
 
     def __len__(self) -> int:
         return self.features.shape[0]
 
 
-def make_batch(steps: Sequence[Step], device: torch.device | str = "cpu") -> Batch:
+def make_batch(
+    steps: Sequence[Step],
+    device: torch.device | str = "cpu",
+    state_offset: int = STATE_OFFSET,
+) -> Batch:
     """把若干决策点打包成一个可以整体前向的批。"""
     device = torch.device(device)
     n_steps = len(steps)
     widest = max(step.features.shape[0] for step in steps)
+    dim = steps[0].features.shape[1]
 
-    features = torch.zeros(n_steps, widest, FEATURE_DIM, device=device)
+    features = torch.zeros(n_steps, widest, dim, device=device)
     mask = torch.zeros(n_steps, widest, dtype=torch.bool, device=device)
     for i, step in enumerate(steps):
         n_moves = step.features.shape[0]
@@ -251,6 +308,7 @@ def make_batch(steps: Sequence[Step], device: torch.device | str = "cpu") -> Bat
         mask=mask,
         actions=torch.tensor([step.action for step in steps], device=device),
         old_log_probs=torch.tensor([step.log_prob for step in steps], device=device),
+        state_offset=state_offset,
     )
 
 
@@ -258,9 +316,9 @@ def evaluate_batch(
     scorer: MoveScorer, value: Optional[ValueNet], batch: Batch
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """用当前网络重新过一遍这批数据，返回 (选中动作的 log 概率, 熵, 状态价值)。"""
-    n_steps, widest, _ = batch.features.shape
+    n_steps, widest, dim = batch.features.shape
 
-    scores = scorer(batch.features.reshape(-1, FEATURE_DIM)).reshape(n_steps, widest)
+    scores = scorer(batch.features.reshape(-1, dim)).reshape(n_steps, widest)
     scores = scores.masked_fill(~batch.mask, float("-inf"))
     log_probs = torch.log_softmax(scores, dim=1)
 
@@ -272,7 +330,7 @@ def evaluate_batch(
     if value is None:
         values = torch.zeros(n_steps, device=batch.features.device)
     else:
-        values = value(batch.features[:, 0, STATE_OFFSET:])
+        values = value(batch.features[:, 0, batch.state_offset :])
 
     return chosen, entropy, values
 
