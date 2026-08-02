@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -72,11 +72,16 @@ class ValueNet(nn.Module):
 
 @dataclass
 class Step:
-    """一个决策点，训练时用得到。"""
+    """一个决策点。
 
-    log_prob: torch.Tensor
-    entropy: torch.Tensor
-    value: torch.Tensor
+    这里存的是**特征本身**而不是带计算图的张量：PPO 要拿同一批数据反复更新好几轮，
+    每轮都得用当前策略重新前向一次，所以采样时只记录输入、选了哪个动作、以及旧策略
+    当时给这个动作的对数概率。
+    """
+
+    features: torch.Tensor   # (候选动作数, FEATURE_DIM)，已 detach
+    action: int              # 选中的候选下标
+    log_prob: float          # 采样时旧策略给的 log π(a|s)
 
 
 @dataclass
@@ -119,18 +124,14 @@ class PolicyAgent:
 
         x = torch.from_numpy(batch_features(obs)).to(self.device)
 
-        with torch.set_grad_enabled(self.training):
+        with torch.no_grad():  # 采样不需要梯度，梯度在更新时重新前向来算
             scores = self.scorer(x) / self.temperature
             if self.training:
                 dist = Categorical(logits=scores)
-                index = int(dist.sample().item())
-                value = self.value(x[0, STATE_OFFSET:]) if self.value is not None else torch.zeros((), device=self.device)
+                sampled = dist.sample()
+                index = int(sampled.item())
                 self.trajectory.steps.append(
-                    Step(
-                        log_prob=dist.log_prob(torch.tensor(index, device=self.device)),
-                        entropy=dist.entropy(),
-                        value=value,
-                    )
+                    Step(features=x, action=index, log_prob=float(dist.log_prob(sampled)))
                 )
             else:
                 index = int(torch.argmax(scores).item())
@@ -171,6 +172,67 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
     scorer.load_state_dict(blob["scorer"])
     scorer.eval()
     return PolicyAgent(scorer, device=device, training=False)
+
+
+@dataclass
+class Batch:
+    """一批决策点，补齐成矩形好一次性前向。
+
+    每个决策点的候选动作数量都不一样，所以按最大值补齐，再用 `mask` 把补出来的位置
+    屏蔽掉——softmax 前填 -inf，它们的概率恒为 0，不会污染梯度。
+    """
+
+    features: torch.Tensor   # (S, M, FEATURE_DIM)
+    mask: torch.Tensor       # (S, M) bool，True 表示是真实候选
+    actions: torch.Tensor    # (S,)
+    old_log_probs: torch.Tensor  # (S,)
+
+    def __len__(self) -> int:
+        return self.features.shape[0]
+
+
+def make_batch(steps: Sequence[Step], device: torch.device | str = "cpu") -> Batch:
+    """把若干决策点打包成一个可以整体前向的批。"""
+    device = torch.device(device)
+    n_steps = len(steps)
+    widest = max(step.features.shape[0] for step in steps)
+
+    features = torch.zeros(n_steps, widest, FEATURE_DIM, device=device)
+    mask = torch.zeros(n_steps, widest, dtype=torch.bool, device=device)
+    for i, step in enumerate(steps):
+        n_moves = step.features.shape[0]
+        features[i, :n_moves] = step.features
+        mask[i, :n_moves] = True
+
+    return Batch(
+        features=features,
+        mask=mask,
+        actions=torch.tensor([step.action for step in steps], device=device),
+        old_log_probs=torch.tensor([step.log_prob for step in steps], device=device),
+    )
+
+
+def evaluate_batch(
+    scorer: MoveScorer, value: Optional[ValueNet], batch: Batch
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """用当前网络重新过一遍这批数据，返回 (选中动作的 log 概率, 熵, 状态价值)。"""
+    n_steps, widest, _ = batch.features.shape
+
+    scores = scorer(batch.features.reshape(-1, FEATURE_DIM)).reshape(n_steps, widest)
+    scores = scores.masked_fill(~batch.mask, float("-inf"))
+    log_probs = torch.log_softmax(scores, dim=1)
+
+    chosen = log_probs.gather(1, batch.actions.unsqueeze(1)).squeeze(1)
+    # 被屏蔽的位置 log_prob 是 -inf，概率是 0，相乘会得到 nan，这里直接置零
+    probs = log_probs.exp()
+    entropy = -(probs * log_probs.masked_fill(~batch.mask, 0.0)).sum(dim=1)
+
+    if value is None:
+        values = torch.zeros(n_steps, device=batch.features.device)
+    else:
+        values = value(batch.features[:, 0, STATE_OFFSET:])
+
+    return chosen, entropy, values
 
 
 def discounted_returns(final_reward: float, n_steps: int, gamma: float) -> np.ndarray:

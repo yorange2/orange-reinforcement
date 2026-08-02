@@ -16,9 +16,12 @@ htmlcov/
 .idea/
 .vscode/
 
-# 训练产物（README 里那两个对比用的权重单独放行）
+# 训练产物（README 里那组对照实验的权重单独放行）
 models/*.pt
 !models/agent.pt
-!models/agent_big.pt
+!models/ppo_small.pt
+!models/ppo_big.pt
+!models/reinforce_small.pt
+!models/reinforce_big.pt
 runs/
 *.log

@@ -21,13 +21,14 @@ import torch.nn.functional as F
 from paodekuai.arena import evaluate_all, final_reward, format_table
 from paodekuai.bots import make_bot
 from paodekuai.game import play_game
-from paodekuai.policy import (MoveScorer, PolicyAgent, ValueNet,
-                              discounted_returns, save_agent)
+from paodekuai.policy import (MoveScorer, PolicyAgent, Step, ValueNet,
+                              discounted_returns, evaluate_batch, make_batch,
+                              save_agent)
 
 OPPONENT_MIX = ["random", "greedy", "rule"]
 
 
-def build_opponents(kind: str, rng: random.Random, episode: int) -> List:
+def build_opponents(kind: str, rng: random.Random) -> List:
     """造两个对手。`mix` 表示每局随机抽，避免只会打一种对手。"""
     if kind == "mix":
         names = [rng.choice(OPPONENT_MIX) for _ in range(2)]
@@ -42,16 +43,15 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     device = torch.device(args.device)
 
     scorer = MoveScorer(hidden=args.hidden, layers=args.layers).to(device)
-    print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，共 {scorer.n_params:,} 个参数")
+    if not args.quiet:
+        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，共 {scorer.n_params:,} 个参数")
     value = ValueNet().to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
     )
     agent = PolicyAgent(scorer, value, device=device, training=True, seed=args.seed)
 
-    batch_logps: List[torch.Tensor] = []
-    batch_values: List[torch.Tensor] = []
-    batch_entropy: List[torch.Tensor] = []
+    batch_steps: List[Step] = []
     batch_returns: List[np.ndarray] = []
 
     recent_wins: List[int] = []
@@ -59,7 +59,7 @@ def train(args: argparse.Namespace) -> PolicyAgent:
 
     for episode in range(1, args.episodes + 1):
         seat = episode % 3
-        players = build_opponents(args.opponent, rng, episode)
+        players = build_opponents(args.opponent, rng)
         players.insert(seat, agent)
 
         agent.trajectory.clear()
@@ -69,16 +69,14 @@ def train(args: argparse.Namespace) -> PolicyAgent:
 
         steps = agent.trajectory.steps
         if steps:
-            batch_logps.append(torch.stack([s.log_prob for s in steps]))
-            batch_values.append(torch.stack([s.value for s in steps]))
-            batch_entropy.append(torch.stack([s.entropy for s in steps]))
+            batch_steps.extend(steps)
             batch_returns.append(discounted_returns(reward, len(steps), args.gamma))
 
-        if episode % args.batch == 0 and batch_logps:
-            _update(optimizer, batch_logps, batch_values, batch_entropy, batch_returns, args)
-            batch_logps, batch_values, batch_entropy, batch_returns = [], [], [], []
+        if episode % args.batch == 0 and batch_steps:
+            _update(optimizer, scorer, value, batch_steps, batch_returns, args, device)
+            batch_steps, batch_returns = [], []
 
-        if episode % args.log_every == 0:
+        if not args.quiet and episode % args.log_every == 0:
             window = recent_wins[-args.log_every :]
             elapsed = time.time() - started
             print(
@@ -86,7 +84,7 @@ def train(args: argparse.Namespace) -> PolicyAgent:
                 f"  用时 {elapsed:5.1f}s  ({episode / elapsed:4.1f} 局/秒)"
             )
 
-        if args.eval_every and episode % args.eval_every == 0:
+        if not args.quiet and args.eval_every and episode % args.eval_every == 0:
             stats = evaluate_all(agent.eval_agent(), games=args.eval_games, seed=12345)
             print(f"  [评测 @ {episode}]")
             print(format_table(stats))
@@ -95,29 +93,43 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     return agent
 
 
-def _update(optimizer, logps, values, entropies, returns, args) -> None:
-    """带基线的 REINFORCE：优势做批内标准化，价值网络用 MSE 拟合回报。"""
-    log_prob = torch.cat(logps)
-    value = torch.cat(values)
-    entropy = torch.cat(entropies)
-    target = torch.from_numpy(np.concatenate(returns)).to(value.device)
+def _update(optimizer, scorer, value_net, steps, returns, args, device) -> None:
+    """用一批轨迹更新一次网络。两种算法只差在策略损失和更新轮数上。
 
-    advantage = target - value.detach()
+    REINFORCE：优势 x log π，一批数据只用一轮。
+    PPO：看新旧策略在这个动作上的概率比 r，把 r 裁剪到 [1-ε, 1+ε] 再取较小的那项。
+         裁剪相当于给更新幅度上了保险，所以同一批数据可以安全地反复用好几轮。
+    """
+    batch = make_batch(steps, device)
+    target = torch.from_numpy(np.concatenate(returns)).to(device)
+
+    # 优势只算一次，用的是更新前的价值估计（PPO 的标准做法）
+    with torch.no_grad():
+        _, _, old_values = evaluate_batch(scorer, value_net, batch)
+    advantage = target - old_values
     if advantage.numel() > 1:
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-    policy_loss = -(log_prob * advantage).mean()
-    value_loss = F.mse_loss(value, target)
-    entropy_bonus = entropy.mean()
+    epochs = args.ppo_epochs if args.algo == "ppo" else 1
+    for _ in range(epochs):
+        log_prob, entropy, values = evaluate_batch(scorer, value_net, batch)
 
-    loss = policy_loss + args.value_coef * value_loss - args.entropy_coef * entropy_bonus
+        if args.algo == "ppo":
+            ratio = torch.exp(log_prob - batch.old_log_probs)
+            clipped = torch.clamp(ratio, 1 - args.clip_ratio, 1 + args.clip_ratio)
+            policy_loss = -torch.min(ratio * advantage, clipped * advantage).mean()
+        else:
+            policy_loss = -(log_prob * advantage).mean()
 
-    optimizer.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(
-        [p for group in optimizer.param_groups for p in group["params"]], args.clip
-    )
-    optimizer.step()
+        value_loss = F.mse_loss(values, target)
+        loss = policy_loss + args.value_coef * value_loss - args.entropy_coef * entropy.mean()
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            [p for group in optimizer.param_groups for p in group["params"]], args.clip
+        )
+        optimizer.step()
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -125,6 +137,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--episodes", type=int, default=8000, help="训练局数（默认 8000）")
+    parser.add_argument("--algo", default="ppo", choices=["ppo", "reinforce"],
+                        help="训练算法（默认 ppo）")
+    parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO 每批数据重复训练几轮")
+    parser.add_argument("--clip-ratio", type=float, default=0.2, help="PPO 的概率比裁剪幅度 ε")
     parser.add_argument("--opponent", default="rule",
                         choices=["random", "greedy", "rule", "mix"], help="训练对手（默认 rule）")
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
@@ -140,6 +156,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--eval-games", type=int, default=300, help="每次评测打多少局")
     parser.add_argument("--final-eval-games", type=int, default=1000, help="训练结束后的评测局数")
     parser.add_argument("--device", default="cpu", help="cpu / mps / cuda")
+    parser.add_argument("--quiet", action="store_true", help="不打印训练过程")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--save", metavar="PATH", help="把训练好的权重存到这里")
     return parser.parse_args(argv)
@@ -148,7 +165,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
-    print(f"训练对手: {args.opponent}   局数: {args.episodes}   设备: {args.device}")
+    print(f"算法: {args.algo}   训练对手: {args.opponent}   局数: {args.episodes}   设备: {args.device}")
     print("三家游戏，随机基准胜率 33.3%\n")
 
     agent = train(args)
