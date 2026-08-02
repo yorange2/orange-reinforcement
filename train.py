@@ -41,7 +41,8 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     rng = random.Random(args.seed)
     device = torch.device(args.device)
 
-    scorer = MoveScorer(hidden=args.hidden).to(device)
+    scorer = MoveScorer(hidden=args.hidden, layers=args.layers).to(device)
+    print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，共 {scorer.n_params:,} 个参数")
     value = ValueNet().to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
@@ -129,6 +130,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
     parser.add_argument("--hidden", type=int, default=128, help="打分网络隐藏层宽度")
+    parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
     parser.add_argument("--batch", type=int, default=16, help="多少局更新一次")
     parser.add_argument("--entropy-coef", type=float, default=0.01, help="熵奖励系数（鼓励探索）")
     parser.add_argument("--value-coef", type=float, default=0.5, help="价值损失系数")

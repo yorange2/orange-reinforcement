@@ -22,17 +22,20 @@ OPPONENTS = ["random", "greedy", "rule"]
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", help="模型权重路径，给了就一起参与评测")
+    parser.add_argument("--model", action="append", default=[], metavar="PATH",
+                        help="模型权重路径，可重复给多个，都会参与评测")
     parser.add_argument("--games", type=int, default=1500, help="每个组合打多少局（默认 1500）")
     parser.add_argument("--seed", type=int, default=999, help="随机种子")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
 
     contenders = []
-    if args.model:
+    for path in args.model:
         from paodekuai.policy import load_agent
 
-        contenders.append(("模型", load_agent(args.model, device=args.device)))
+        agent = load_agent(path, device=args.device)
+        label = f"{path.split('/')[-1]}({agent.scorer.n_params / 1000:.0f}k)"
+        contenders.append((label, agent))
     contenders.extend((name, make_bot(name, seed=args.seed)) for name in reversed(OPPONENTS))
 
     width = max(len(name) for name, _ in contenders) + 2

@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
+import itertools
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 from .bots import make_bot
 from .game import GameResult, play_game
@@ -84,6 +85,54 @@ def evaluate_all(
 ) -> Dict[str, MatchStats]:
     """依次对三种规则对手评测。"""
     return {name: evaluate(agent, name, games=games, seed=seed) for name in opponents}
+
+
+def match(
+    players: Sequence[Tuple[str, object]],
+    deals: int = 300,
+    seed: int = 0,
+) -> List[Tuple[str, MatchStats]]:
+    """三个不同选手同桌混战，返回每个选手的战绩。
+
+    每副牌都会按 6 种座位排列各打一遍，所以牌运和先手完全对消：谁赢下来
+    就是真的强。总局数 = deals x 6，每人各自的基准胜率仍是 33.3%。
+    """
+    if len(players) != 3:
+        raise ValueError(f"需要正好 3 个选手，收到 {len(players)} 个")
+
+    wins = [0, 0, 0]
+    remaining: List[List[int]] = [[], [], []]
+    turns: List[int] = []
+    games = 0
+
+    for deal_index in range(deals):
+        for seats in itertools.permutations(range(3)):
+            # seats[i] 是第 i 号选手这一局坐的位置
+            table: List[object] = [None, None, None]
+            for i, seat in enumerate(seats):
+                table[seat] = players[i][1]
+
+            result = play_game(table, rng=random.Random(seed + deal_index))
+            games += 1
+            turns.append(result.turns)
+            for i, seat in enumerate(seats):
+                if result.winner == seat:
+                    wins[i] += 1
+                else:
+                    remaining[i].append(result.remaining[seat])
+
+    return [
+        (
+            players[i][0],
+            MatchStats(
+                games=games,
+                wins=wins[i],
+                avg_remaining=sum(remaining[i]) / len(remaining[i]) if remaining[i] else 0.0,
+                avg_turns=sum(turns) / len(turns),
+            ),
+        )
+        for i in range(3)
+    ]
 
 
 def bot_vs_bot(a: str, b: str, games: int = 300, seed: int = 0) -> MatchStats:

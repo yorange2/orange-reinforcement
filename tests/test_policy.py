@@ -112,6 +112,44 @@ class TestPolicyAgent(unittest.TestCase):
             self.assertEqual(scorer(torch.zeros(n, FEATURE_DIM)).shape, (n,))
 
 
+class TestModelSize(unittest.TestCase):
+    def test_more_layers_and_width_means_more_parameters(self):
+        small = MoveScorer(hidden=128, layers=2)
+        big = MoveScorer(hidden=512, layers=3)
+        self.assertEqual(small.n_params, 21889)
+        self.assertGreater(big.n_params, 20 * small.n_params)
+
+    def test_deeper_scorer_still_scores_every_candidate(self):
+        scorer = MoveScorer(hidden=32, layers=4)
+        self.assertEqual(len([m for m in scorer.net if isinstance(m, torch.nn.Linear)]), 5)
+        self.assertEqual(scorer(torch.zeros(7, FEATURE_DIM)).shape, (7,))
+
+    def test_at_least_one_hidden_layer_required(self):
+        with self.assertRaises(ValueError):
+            MoveScorer(layers=0)
+
+    def test_checkpoint_round_trips_the_architecture(self):
+        scorer = MoveScorer(hidden=64, layers=3)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "big.pt")
+            save_agent(path, scorer)
+            restored = load_agent(path)
+        self.assertEqual((restored.scorer.hidden, restored.scorer.layers), (64, 3))
+        self.assertEqual(restored.scorer.n_params, scorer.n_params)
+
+    def test_old_checkpoints_without_layers_default_to_two(self):
+        scorer = MoveScorer(hidden=32, layers=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.pt")
+            torch.save(
+                {"scorer": scorer.state_dict(), "value": None, "hidden": 32,
+                 "feature_dim": FEATURE_DIM, "meta": {}},  # 故意不写 layers
+                path,
+            )
+            restored = load_agent(path)
+        self.assertEqual(restored.scorer.layers, 2)
+
+
 class TestReturnsAndCheckpoints(unittest.TestCase):
     def test_returns_discount_backwards_from_the_final_reward(self):
         returns = discounted_returns(1.0, 3, gamma=0.5)

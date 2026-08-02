@@ -28,17 +28,28 @@ STATE_DIM = FEATURE_DIM - STATE_OFFSET
 
 
 class MoveScorer(nn.Module):
-    """给单个候选动作打分。输入 (动作数, FEATURE_DIM)，输出 (动作数,)。"""
+    """给单个候选动作打分。输入 (动作数, FEATURE_DIM)，输出 (动作数,)。
 
-    def __init__(self, dim: int = FEATURE_DIM, hidden: int = 128) -> None:
+    `hidden` 是隐藏层宽度，`layers` 是隐藏层数量，一起决定模型大小。
+    """
+
+    def __init__(self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1),
-        )
+        if layers < 1:
+            raise ValueError("至少要有一层隐藏层")
+
+        self.hidden = hidden
+        self.layers = layers
+
+        blocks: List[nn.Module] = [nn.Linear(dim, hidden), nn.ReLU()]
+        for _ in range(layers - 1):
+            blocks += [nn.Linear(hidden, hidden), nn.ReLU()]
+        blocks.append(nn.Linear(hidden, 1))
+        self.net = nn.Sequential(*blocks)
+
+    @property
+    def n_params(self) -> int:
+        return sum(p.numel() for p in self.parameters())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
@@ -139,7 +150,8 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
         {
             "scorer": scorer.state_dict(),
             "value": value.state_dict() if value is not None else None,
-            "hidden": scorer.net[0].out_features,
+            "hidden": scorer.hidden,
+            "layers": scorer.layers,
             "feature_dim": FEATURE_DIM,
             "meta": meta or {},
         },
@@ -154,7 +166,8 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
         raise ValueError(
             f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维，特征改过了就得重训"
         )
-    scorer = MoveScorer(hidden=blob["hidden"]).to(device)
+    # layers 是后加的字段，早期存的权重默认为 2 层
+    scorer = MoveScorer(hidden=blob["hidden"], layers=blob.get("layers", 2)).to(device)
     scorer.load_state_dict(blob["scorer"])
     scorer.eval()
     return PolicyAgent(scorer, device=device, training=False)

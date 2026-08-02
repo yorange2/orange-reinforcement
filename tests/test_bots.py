@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from paodekuai.arena import bot_vs_bot, evaluate, final_reward
+from paodekuai.arena import bot_vs_bot, evaluate, final_reward, match
 from paodekuai.bots import BOTS, make_bot
 from paodekuai.cards import parse_card
 from paodekuai.combos import BOMB, classify
@@ -115,6 +115,38 @@ class TestBotStrengthOrdering(unittest.TestCase):
     def test_identical_bots_land_near_the_one_in_three_baseline(self):
         rate = bot_vs_bot("rule", "rule", games=300, seed=11).win_rate
         self.assertAlmostEqual(rate, 1 / 3, delta=0.09)
+
+
+class TestThreeWayMatch(unittest.TestCase):
+    """三方混战：每副牌打满 6 种座位排列，牌运和先手都被对消。"""
+
+    def test_needs_exactly_three_players(self):
+        with self.assertRaises(ValueError):
+            match([("a", make_bot("rule")), ("b", make_bot("greedy"))], deals=1)
+
+    def test_plays_six_games_per_deal(self):
+        results = match(
+            [(name, make_bot(name)) for name in ("rule", "greedy", "random")], deals=5, seed=0
+        )
+        self.assertEqual([stats.games for _, stats in results], [30, 30, 30])
+
+    def test_win_rates_sum_to_one(self):
+        results = match(
+            [(name, make_bot(name)) for name in ("rule", "greedy", "random")], deals=20, seed=1
+        )
+        self.assertAlmostEqual(sum(stats.win_rate for _, stats in results), 1.0, places=6)
+
+    def test_identical_players_all_land_near_the_baseline(self):
+        results = match([(f"rule{i}", make_bot("rule")) for i in range(3)], deals=40, seed=2)
+        for _, stats in results:
+            self.assertAlmostEqual(stats.win_rate, 1 / 3, delta=0.1)
+
+    def test_stronger_bot_wins_the_table(self):
+        results = dict(
+            match([(name, make_bot(name)) for name in ("rule", "greedy", "random")], deals=40, seed=3)
+        )
+        self.assertGreater(results["rule"].win_rate, results["greedy"].win_rate)
+        self.assertGreater(results["greedy"].win_rate, results["random"].win_rate)
 
 
 class TestArenaHelpers(unittest.TestCase):
