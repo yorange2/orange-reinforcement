@@ -160,16 +160,46 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
     )
 
 
-def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
-    """读取模型，返回可以直接对局的智能体。"""
-    blob = torch.load(path, map_location=device, weights_only=False)
-    if blob["feature_dim"] != FEATURE_DIM:
+#: 特征扩充历史：{旧维度: (新特征插入的位置, 插入了几维)}。
+#: 用来把老权重迁移到当前特征上——新列全部补 0，等价于"这些特征不存在"，
+#: 所以迁移后的老模型行为和它当初训练时**逐位一致**，归档的对照结果仍然可复现。
+FEATURE_MIGRATIONS = {
+    40: (26, 2),  # 26/27 位插入 attach_rank_max / attach_rank_min
+}
+
+
+def _migrate_first_layer(state_dict: dict, old_dim: int) -> dict:
+    """把第一层权重从 `old_dim` 列扩到 FEATURE_DIM 列，新列填 0。"""
+    if old_dim not in FEATURE_MIGRATIONS:
         raise ValueError(
-            f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维，特征改过了就得重训"
+            f"模型是用 {old_dim} 维特征训练的，当前是 {FEATURE_DIM} 维，且没有对应的迁移规则，需要重训"
         )
+
+    at, count = FEATURE_MIGRATIONS[old_dim]
+    if old_dim + count != FEATURE_DIM:
+        raise ValueError(f"迁移规则和当前特征维度对不上：{old_dim} + {count} != {FEATURE_DIM}")
+
+    key = "net.0.weight"
+    old = state_dict[key]
+    migrated = torch.zeros(old.shape[0], FEATURE_DIM, dtype=old.dtype)
+    migrated[:, :at] = old[:, :at]
+    migrated[:, at + count :] = old[:, at:]
+
+    state_dict = dict(state_dict)
+    state_dict[key] = migrated
+    return state_dict
+
+
+def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
+    """读取模型，返回可以直接对局的智能体。老特征维度的权重会自动迁移。"""
+    blob = torch.load(path, map_location=device, weights_only=False)
     # layers 是后加的字段，早期存的权重默认为 2 层
     scorer = MoveScorer(hidden=blob["hidden"], layers=blob.get("layers", 2)).to(device)
-    scorer.load_state_dict(blob["scorer"])
+
+    weights = blob["scorer"]
+    if blob["feature_dim"] != FEATURE_DIM:
+        weights = _migrate_first_layer(weights, blob["feature_dim"])
+    scorer.load_state_dict(weights)
     scorer.eval()
     return PolicyAgent(scorer, device=device, training=False)
 

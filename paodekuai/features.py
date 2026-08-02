@@ -16,7 +16,7 @@ from .combos import BOMB, KIND_INDEX, KINDS, Combo, estimate_turns
 from .game import Action, Observation
 
 #: 局面特征在向量里的起始下标，价值网络只吃这一段。
-STATE_OFFSET = 26
+STATE_OFFSET = 28
 
 FEATURE_NAMES: List[str] = (
     [f"kind_{kind}" for kind in KINDS]
@@ -24,6 +24,9 @@ FEATURE_NAMES: List[str] = (
         "is_pass", "is_bomb", "rank", "n_cards", "length", "hand_after",
         "wins_now", "turns_after", "turns_gain", "breaks_pair", "breaks_triple",
         "breaks_bomb", "n_attach", "higher_unseen", "is_top_rank",
+        # 带牌本身的点数。少了这两维，"QQQ 带 6" 和 "QQQ 带 K" 在网络眼里
+        # 一模一样（牌型/主牌/拆解代价全同），只能瞎猜一个。
+        "attach_rank_max", "attach_rank_min",
     ]
     + [
         "is_leading", "hand_size", "min_opp_hand", "opp_le_2", "opp_le_1",
@@ -100,6 +103,7 @@ def _move_features(
             1.0, 0.0, 0.0, 0.0, 0.0,
             hand_size / 16.0, 0.0, turns_now / 10.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0,
         ]
 
     kind_onehot[KIND_INDEX[move.kind]] = 1.0
@@ -121,7 +125,12 @@ def _move_features(
                 breaks_pair += 1
 
     higher_unseen = sum(c for rank, c in unseen.items() if rank > move.rank) / total_unseen
+
     n_attach = played - _body_size(move)
+    # 带出去的是哪几张牌：甩掉一张废牌和搭进去一张 K 差别很大。
+    attach_ranks = attachment_ranks(move)
+    attach_max = (max(attach_ranks) - 3) / 11.0 if attach_ranks else 0.0
+    attach_min = (min(attach_ranks) - 3) / 11.0 if attach_ranks else 0.0
 
     return kind_onehot + [
         0.0,
@@ -139,7 +148,27 @@ def _move_features(
         n_attach / 4.0,
         higher_unseen,
         1.0 if move.rank == 14 else 0.0,
+        attach_max,
+        attach_min,
     ]
+
+
+def attachment_ranks(move: Combo) -> List[int]:
+    """带牌的点数（三带一/三带二/飞机带牌才有，其余返回空）。
+
+    按点数判定而不是按 `move.cards` 的前后顺序：生成器产出的牌是"主体在前带牌在后"，
+    但 `classify()` 会把牌重新排序，靠位置切会切错。
+    """
+    from .combos import (PLANE_ONE, PLANE_TWO, TRIPLE_ONE, TRIPLE_TWO)
+
+    if move.kind in (TRIPLE_ONE, TRIPLE_TWO):
+        body_ranks = {move.rank}
+    elif move.kind in (PLANE_ONE, PLANE_TWO):
+        body_ranks = set(range(move.rank - move.length + 1, move.rank + 1))
+    else:
+        return []
+
+    return sorted({card.rank for card in move.cards if card.rank not in body_ranks})
 
 
 def _body_size(move: Combo) -> int:

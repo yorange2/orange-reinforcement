@@ -11,9 +11,10 @@ from paodekuai.bots import make_bot
 from paodekuai.cards import parse_card
 from paodekuai.combos import classify
 from paodekuai.features import (FEATURE_DIM, FEATURE_NAMES, STATE_OFFSET,
-                                batch_features)
+                                attachment_ranks, batch_features)
 from paodekuai.game import Game, play_game
-from paodekuai.policy import (MoveScorer, PolicyAgent, Step, ValueNet,
+from paodekuai.policy import (FEATURE_MIGRATIONS, MoveScorer, PolicyAgent,
+                              Step, ValueNet, _migrate_first_layer,
                               discounted_returns, evaluate_batch, load_agent,
                               make_batch, save_agent)
 from tests.test_bots import observation
@@ -120,7 +121,9 @@ class TestModelSize(unittest.TestCase):
     def test_more_layers_and_width_means_more_parameters(self):
         small = MoveScorer(hidden=128, layers=2)
         big = MoveScorer(hidden=512, layers=3)
-        self.assertEqual(small.n_params, 21889)
+        # 输入层 + 一个隐藏层 + 输出层，按特征维度算，加特征时不用改这个数字
+        expected = (FEATURE_DIM * 128 + 128) + (128 * 128 + 128) + (128 + 1)
+        self.assertEqual(small.n_params, expected)
         self.assertGreater(big.n_params, 20 * small.n_params)
 
     def test_deeper_scorer_still_scores_every_candidate(self):
@@ -152,6 +155,91 @@ class TestModelSize(unittest.TestCase):
             )
             restored = load_agent(path)
         self.assertEqual(restored.scorer.layers, 2)
+
+
+class TestAttachmentFeatures(unittest.TestCase):
+    """带牌的点数：少了这两维，"QQQ 带 6" 和 "QQQ 带 K" 在网络眼里完全一样。"""
+
+    def test_triple_with_attachment_reports_the_attached_rank(self):
+        low = classify(cards("Q", "cQ", "hQ", "6"))
+        high = classify(cards("Q", "cQ", "hQ", "K"))
+        self.assertEqual(attachment_ranks(low), [6])
+        self.assertEqual(attachment_ranks(high), [13])
+
+    def test_plain_combos_have_no_attachment(self):
+        for combo in (classify(cards("5")), classify(cards("5", "c5")),
+                      classify(cards("3", "4", "5", "6", "7")),
+                      classify(cards("9", "c9", "h9"))):
+            self.assertEqual(attachment_ranks(combo), [])
+
+    def test_plane_attachments_exclude_the_body(self):
+        combo = classify(cards("3", "c3", "h3", "4", "c4", "h4", "9", "K"))
+        self.assertEqual(attachment_ranks(combo), [9, 13])
+
+    def test_attachment_ranks_ignore_card_order(self):
+        # classify() 会把牌排序，按位置切会切错，所以必须按点数判定
+        combo = classify(cards("3", "Q", "cQ", "hQ"))  # 带的是 3，排序后跑到了最前面
+        self.assertEqual(attachment_ranks(combo), [3])
+
+    def test_features_distinguish_a_small_kicker_from_a_big_one(self):
+        hand = cards("Q", "cQ", "hQ", "6", "K")
+        obs = observation(hand)
+        x = batch_features(obs)
+        column = FEATURE_NAMES.index("attach_rank_max")
+
+        rows = {}
+        for i, move in enumerate(obs.legal):
+            if move is not None and move.kind == "triple_one":
+                rows[attachment_ranks(move)[0]] = float(x[i, column])
+
+        self.assertIn(6, rows)
+        self.assertIn(13, rows)
+        self.assertLess(rows[6], rows[13], "带小牌和带大牌的特征必须不同")
+
+
+class TestCheckpointMigration(unittest.TestCase):
+    """老特征维度的权重要能加载，而且行为必须逐位不变。"""
+
+    def test_migration_pads_the_new_columns_with_zeros(self):
+        old_dim = next(iter(FEATURE_MIGRATIONS))
+        at, count = FEATURE_MIGRATIONS[old_dim]
+        old = MoveScorer(dim=old_dim, hidden=8)
+        migrated = _migrate_first_layer(old.state_dict(), old_dim)["net.0.weight"]
+
+        self.assertEqual(migrated.shape, (8, FEATURE_DIM))
+        self.assertTrue((migrated[:, at : at + count] == 0).all())
+        torch.testing.assert_close(migrated[:, :at], old.net[0].weight[:, :at])
+        torch.testing.assert_close(migrated[:, at + count :], old.net[0].weight[:, at:])
+
+    def test_migrated_model_scores_exactly_the_same(self):
+        old_dim = next(iter(FEATURE_MIGRATIONS))
+        at, count = FEATURE_MIGRATIONS[old_dim]
+        old = MoveScorer(dim=old_dim, hidden=16)
+        for param in old.parameters():
+            torch.nn.init.normal_(param, std=0.4)
+
+        new = MoveScorer(hidden=16)
+        new.load_state_dict(_migrate_first_layer(old.state_dict(), old_dim))
+
+        x_old = torch.randn(9, old_dim)
+        x_new = torch.zeros(9, FEATURE_DIM)
+        x_new[:, :at] = x_old[:, :at]
+        x_new[:, at + count :] = x_old[:, at:]
+        x_new[:, at : at + count] = torch.randn(9, count)  # 新特征取什么值都不该有影响
+
+        with torch.no_grad():
+            torch.testing.assert_close(new(x_new), old(x_old))
+
+    def test_shipped_checkpoints_still_load(self):
+        for name in ("agent.pt", "ppo_small.pt", "reinforce_small.pt"):
+            path = os.path.join("models", name)
+            if os.path.exists(path):
+                agent = load_agent(path)
+                self.assertEqual(agent.scorer.net[0].in_features, FEATURE_DIM)
+
+    def test_unknown_feature_size_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _migrate_first_layer({"net.0.weight": torch.zeros(4, 7)}, 7)
 
 
 class TestBatching(unittest.TestCase):
