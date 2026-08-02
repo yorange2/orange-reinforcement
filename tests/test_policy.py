@@ -118,11 +118,13 @@ class TestPolicyAgent(unittest.TestCase):
 
 class TestModelSize(unittest.TestCase):
     def test_more_layers_and_width_means_more_parameters(self):
-        small = MoveScorer(hidden=128, layers=2)
-        big = MoveScorer(hidden=512, layers=3)
+        small = MoveScorer(hidden=128, layers=2, norm="none")
+        big = MoveScorer(hidden=512, layers=3, norm="none")
         # 输入层 + 一个隐藏层 + 输出层，按特征维度算，加特征时不用改这个数字
         expected = (FEATURE_DIM * 128 + 128) + (128 * 128 + 128) + (128 + 1)
         self.assertEqual(small.n_params, expected)
+        # LayerNorm 每个隐藏层多两组参数
+        self.assertEqual(MoveScorer(hidden=128, layers=2).n_params, expected + 2 * 2 * 128)
         self.assertGreater(big.n_params, 20 * small.n_params)
 
     def test_deeper_scorer_still_scores_every_candidate(self):
@@ -144,7 +146,7 @@ class TestModelSize(unittest.TestCase):
         self.assertEqual(restored.scorer.n_params, scorer.n_params)
 
     def test_old_checkpoints_without_layers_default_to_two(self):
-        scorer = MoveScorer(hidden=32, layers=2)
+        scorer = MoveScorer(hidden=32, layers=2, norm="none")
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "legacy.pt")
             torch.save(
@@ -154,6 +156,80 @@ class TestModelSize(unittest.TestCase):
             )
             restored = load_agent(path)
         self.assertEqual(restored.scorer.layers, 2)
+
+
+class TestNormalization(unittest.TestCase):
+    """归一化层。只提供 LayerNorm，不提供 BatchNorm——理由见 policy.py 顶部。"""
+
+    def test_layer_norm_is_the_default(self):
+        # 正式预算下 LayerNorm 三栏全赢，所以设成默认
+        self.assertEqual(MoveScorer().norm, "layer")
+        self.assertEqual(train_module.parse_args([]).norm, "layer")
+
+    def test_norm_can_be_turned_off(self):
+        scorer = MoveScorer(norm="none")
+        self.assertFalse(any(isinstance(m, torch.nn.LayerNorm) for m in scorer.net))
+
+    def test_layer_norm_goes_after_every_hidden_linear(self):
+        scorer = MoveScorer(hidden=32, layers=3, norm="layer")
+        norms = [m for m in scorer.net if isinstance(m, torch.nn.LayerNorm)]
+        self.assertEqual(len(norms), 3)
+        self.assertTrue(all(m.normalized_shape == (32,) for m in norms))
+        # 输出层后面不该有归一化
+        self.assertIsInstance(scorer.net[-1], torch.nn.Linear)
+
+    def test_value_net_takes_the_same_option(self):
+        self.assertEqual(
+            len([m for m in ValueNet(norm="layer").net if isinstance(m, torch.nn.LayerNorm)]), 1
+        )
+
+    def test_unknown_norm_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MoveScorer(norm="batch")  # BatchNorm 在这里是错的，不该悄悄放行
+
+    def test_scores_each_candidate_independently(self):
+        """LayerNorm 只在单个样本内部归一化，候选之间不能互相影响。
+
+        这正是 BatchNorm 做不到的：换成 BatchNorm，一手牌的分数会随着同批次里
+        有哪些别的候选而改变，补齐用的假零行也会污染统计量。
+        """
+        torch.manual_seed(0)
+        scorer = MoveScorer(hidden=16, norm="layer").eval()
+        x = torch.randn(6, FEATURE_DIM)
+
+        with torch.no_grad():
+            together = scorer(x)
+            alone = torch.cat([scorer(x[i : i + 1]) for i in range(6)])
+            padded = scorer(torch.cat([x, torch.zeros(20, FEATURE_DIM)]))[:6]
+
+        torch.testing.assert_close(together, alone)
+        torch.testing.assert_close(together, padded)
+
+    def test_checkpoint_remembers_the_norm(self):
+        scorer = MoveScorer(hidden=32, norm="layer")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ln.pt")
+            save_agent(path, scorer)
+            restored = load_agent(path)
+        self.assertEqual(restored.scorer.norm, "layer")
+        self.assertEqual(restored.scorer.n_params, scorer.n_params)
+
+    def test_old_checkpoints_without_norm_default_to_none(self):
+        scorer = MoveScorer(hidden=32, norm="none")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.pt")
+            torch.save({"scorer": scorer.state_dict(), "value": None, "hidden": 32,
+                        "layers": 2, "feature_dim": FEATURE_DIM, "meta": {}}, path)
+            self.assertEqual(load_agent(path).scorer.norm, "none")
+
+    def test_training_with_layer_norm_runs(self):
+        args = train_module.parse_args(
+            ["--norm", "layer", "--episodes", "40", "--batch", "8", "--eval-every", "0",
+             "--hidden", "16", "--quiet"]
+        )
+        agent = train_module.train(args)
+        for param in agent.scorer.parameters():
+            self.assertTrue(torch.isfinite(param).all())
 
 
 class TestAttachmentFeatures(unittest.TestCase):

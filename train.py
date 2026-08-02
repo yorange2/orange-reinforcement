@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from paodekuai.arena import evaluate_all, final_reward, format_table
 from paodekuai.bots import make_bot
 from paodekuai.game import play_game
-from paodekuai.policy import (MoveScorer, PolicyAgent, Step, ValueNet,
+from paodekuai.policy import (NORMS, MoveScorer, PolicyAgent, Step, ValueNet,
                               discounted_returns, evaluate_batch, make_batch,
                               save_agent)
 
@@ -105,10 +105,11 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     rng = random.Random(args.seed)
     device = torch.device(args.device)
 
-    scorer = MoveScorer(hidden=args.hidden, layers=args.layers).to(device)
+    scorer = MoveScorer(hidden=args.hidden, layers=args.layers, norm=args.norm).to(device)
     if not args.quiet:
-        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，共 {scorer.n_params:,} 个参数")
-    value = ValueNet().to(device)
+        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}，"
+              f"共 {scorer.n_params:,} 个参数")
+    value = ValueNet(norm=args.norm).to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
     )
@@ -224,6 +225,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
     parser.add_argument("--hidden", type=int, default=128, help="打分网络隐藏层宽度")
     parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
+    parser.add_argument("--norm", default="layer", choices=list(NORMS),
+                        help="隐藏层归一化方式（默认 layer=LayerNorm；不提供 BatchNorm，原因见 policy.py）")
     parser.add_argument("--batch", type=int, default=16, help="多少局更新一次")
     parser.add_argument("--entropy-coef", type=float, default=0.01, help="熵奖励系数（鼓励探索）")
     parser.add_argument("--value-coef", type=float, default=0.5, help="价值损失系数")

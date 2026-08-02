@@ -27,6 +27,26 @@ from .game import Action, Observation
 
 STATE_DIM = FEATURE_DIM - STATE_OFFSET
 
+#: 可选的归一化层。
+#:
+#: 这里**不能用 BatchNorm**：MoveScorer 的"批"维度装的是候选动作而不是独立样本，
+#: BatchNorm 会让一手牌的分数取决于当时碰巧还有哪些牌可出；训练时更糟，一批数据里
+#: 混着大量补齐用的假零行（见 make_batch），它们会污染统计量。而且 PPO 的概率比
+#: π_new/π_old 要求 π 只是"状态 + 参数"的函数，一旦依赖同批次的其他样本，
+#: 采样时和更新时的批构成完全不同，这个比值就没意义了。
+#:
+#: LayerNorm 没有这些问题：它在单个样本的特征维度内归一化，候选之间互不影响，
+#: 训练和推理行为一致。
+NORMS = ("none", "layer")
+
+
+def make_norm(norm: str, width: int) -> List[nn.Module]:
+    if norm == "none":
+        return []
+    if norm == "layer":
+        return [nn.LayerNorm(width)]
+    raise ValueError(f"未知的归一化方式 {norm!r}，可选: {', '.join(NORMS)}")
+
 
 class MoveScorer(nn.Module):
     """给单个候选动作打分。输入 (动作数, FEATURE_DIM)，输出 (动作数,)。
@@ -34,17 +54,24 @@ class MoveScorer(nn.Module):
     `hidden` 是隐藏层宽度，`layers` 是隐藏层数量，一起决定模型大小。
     """
 
-    def __init__(self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2) -> None:
+    def __init__(
+        self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2, norm: str = "layer"
+    ) -> None:
         super().__init__()
         if layers < 1:
             raise ValueError("至少要有一层隐藏层")
 
         self.hidden = hidden
         self.layers = layers
+        self.norm = norm
 
-        blocks: List[nn.Module] = [nn.Linear(dim, hidden), nn.ReLU()]
-        for _ in range(layers - 1):
-            blocks += [nn.Linear(hidden, hidden), nn.ReLU()]
+        blocks: List[nn.Module] = []
+        in_dim = dim
+        for _ in range(layers):
+            blocks.append(nn.Linear(in_dim, hidden))
+            blocks.extend(make_norm(norm, hidden))
+            blocks.append(nn.ReLU())
+            in_dim = hidden
         blocks.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*blocks)
 
@@ -59,10 +86,11 @@ class MoveScorer(nn.Module):
 class ValueNet(nn.Module):
     """估计当前局面的期望回报，用作 REINFORCE 的基线。"""
 
-    def __init__(self, dim: int = STATE_DIM, hidden: int = 64) -> None:
+    def __init__(self, dim: int = STATE_DIM, hidden: int = 64, norm: str = "layer") -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden),
+            *make_norm(norm, hidden),
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
@@ -163,6 +191,7 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
             "value": value.state_dict() if value is not None else None,
             "hidden": scorer.hidden,
             "layers": scorer.layers,
+            "norm": scorer.norm,
             "feature_dim": FEATURE_DIM,
             "meta": meta or {},
         },
@@ -178,8 +207,10 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
             f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维，"
             "特征改过了就得重训"
         )
-    # layers 是后加的字段，早期存的权重默认为 2 层
-    scorer = MoveScorer(hidden=blob["hidden"], layers=blob.get("layers", 2)).to(device)
+    # layers / norm 都是后加的字段，早期存的权重按当时的默认值来
+    scorer = MoveScorer(
+        hidden=blob["hidden"], layers=blob.get("layers", 2), norm=blob.get("norm", "none")
+    ).to(device)
     scorer.load_state_dict(blob["scorer"])
     scorer.eval()
     return PolicyAgent(scorer, device=device, training=False)
