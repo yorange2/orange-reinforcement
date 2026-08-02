@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import random
 import time
 from typing import List, Optional
@@ -32,12 +33,71 @@ OPPONENT_MIX = ["random", "greedy", "rule"]
 
 
 def build_opponents(kind: str, rng: random.Random) -> List:
-    """造两个对手。`mix` 表示每局随机抽，避免只会打一种对手。"""
+    """造两个规则对手。`mix` 表示每局随机抽，避免只会打一种对手。"""
     if kind == "mix":
         names = [rng.choice(OPPONENT_MIX) for _ in range(2)]
     else:
         names = [kind, kind]
     return [make_bot(name, seed=rng.randrange(1 << 30)) for name in names]
+
+
+class OpponentPool:
+    """自我对弈的对手池：装着模型过去若干个版本的快照。
+
+    只跟"当前的自己"打有两个毛病：对手一直在变，等于追移动靶；而且两个相同的策略
+    容易互相绕圈（我克制你、你克制我、转回原点）。所以定期存快照丢进池子，每局从
+    池子里随机抽，等于跟自己的一整段历史打。
+
+    另外按 `bot_ratio` 掺一些规则机器人保底，免得自我对弈把自己关进小房间里，
+    练出一套只对自己人管用的打法。
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        bot_ratio: float,
+        snapshot_every: int,
+        rng: random.Random,
+        device: torch.device,
+    ) -> None:
+        self.capacity = capacity
+        self.bot_ratio = bot_ratio
+        self.snapshot_every = snapshot_every
+        self.rng = rng
+        self.device = device
+        self.snapshots: List[PolicyAgent] = []
+
+    def maybe_snapshot(self, episode: int, scorer: MoveScorer) -> bool:
+        """到点了就把当前模型冻一份丢进池子，满了淘汰最老的。"""
+        if episode % self.snapshot_every:
+            return False
+
+        frozen = copy.deepcopy(scorer).to(self.device)
+        frozen.eval()
+        for param in frozen.parameters():
+            param.requires_grad_(False)
+
+        # 快照对手要采样而不是取最高分，否则每局打得一模一样，提供不了多样的对局
+        self.snapshots.append(
+            PolicyAgent(frozen, device=self.device, training=False, sample=True)
+        )
+        if len(self.snapshots) > self.capacity:
+            self.snapshots.pop(0)
+        return True
+
+    def draw(self) -> List:
+        """抽两个对手。池子还空着的时候先用规则机器人顶上。"""
+        if not self.snapshots:
+            return build_opponents("mix", self.rng)
+
+        opponents = []
+        for _ in range(2):
+            if self.rng.random() < self.bot_ratio:
+                opponents.append(make_bot(self.rng.choice(OPPONENT_MIX),
+                                          seed=self.rng.randrange(1 << 30)))
+            else:
+                opponents.append(self.rng.choice(self.snapshots))
+        return opponents
 
 
 def train(args: argparse.Namespace) -> PolicyAgent:
@@ -54,6 +114,10 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     )
     agent = PolicyAgent(scorer, value, device=device, training=True, seed=args.seed)
 
+    pool = None
+    if args.opponent == "self":
+        pool = OpponentPool(args.pool_size, args.bot_ratio, args.snapshot_every, rng, device)
+
     batch_steps: List[Step] = []
     batch_returns: List[np.ndarray] = []
 
@@ -62,7 +126,11 @@ def train(args: argparse.Namespace) -> PolicyAgent:
 
     for episode in range(1, args.episodes + 1):
         seat = episode % 3
-        players = build_opponents(args.opponent, rng)
+        if pool is not None:
+            pool.maybe_snapshot(episode, scorer)
+            players = pool.draw()
+        else:
+            players = build_opponents(args.opponent, rng)
         players.insert(seat, agent)
 
         agent.trajectory.clear()
@@ -146,7 +214,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ppo-epochs", type=int, default=4, help="PPO 每批数据重复训练几轮")
     parser.add_argument("--clip-ratio", type=float, default=0.2, help="PPO 的概率比裁剪幅度 ε")
     parser.add_argument("--opponent", default="rule",
-                        choices=["random", "greedy", "rule", "mix"], help="训练对手（默认 rule）")
+                        choices=["random", "greedy", "rule", "mix", "self"],
+                        help="训练对手（默认 rule；self 表示自我对弈）")
+    parser.add_argument("--pool-size", type=int, default=8, help="自我对弈的对手池装几个快照")
+    parser.add_argument("--snapshot-every", type=int, default=250, help="每多少局存一个快照")
+    parser.add_argument("--bot-ratio", type=float, default=0.2,
+                        help="自我对弈时掺多少比例的规则对手保底")
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
     parser.add_argument("--hidden", type=int, default=128, help="打分网络隐藏层宽度")

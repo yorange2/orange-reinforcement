@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
@@ -108,11 +109,15 @@ class PolicyAgent:
         training: bool = False,
         temperature: float = 1.0,
         seed: Optional[int] = None,
+        sample: bool = False,
     ) -> None:
         self.scorer = scorer
         self.value = value
         self.device = torch.device(device)
         self.training = training
+        #: 按概率抽动作而不是取最高分。`training` 必然要采样；自我对弈的快照对手
+        #: 也要采样（不然它每局打得一模一样，提供不了多样的对局），但不记录轨迹。
+        self.sample = sample or training
         self.temperature = temperature
         self.rng = random.Random(seed)
         self.trajectory = Trajectory()
@@ -126,15 +131,16 @@ class PolicyAgent:
 
         with torch.no_grad():  # 采样不需要梯度，梯度在更新时重新前向来算
             scores = self.scorer(x) / self.temperature
+            if not self.sample:
+                return obs.legal[int(torch.argmax(scores).item())]
+
+            dist = Categorical(logits=scores)
+            sampled = dist.sample()
+            index = int(sampled.item())
             if self.training:
-                dist = Categorical(logits=scores)
-                sampled = dist.sample()
-                index = int(sampled.item())
                 self.trajectory.steps.append(
                     Step(features=x, action=index, log_prob=float(dist.log_prob(sampled)))
                 )
-            else:
-                index = int(torch.argmax(scores).item())
 
         return obs.legal[index]
 
@@ -146,7 +152,11 @@ class PolicyAgent:
 
 
 def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, meta: Optional[dict] = None) -> None:
-    """保存模型权重。"""
+    """保存模型权重。目录不存在就建出来——训练跑了几分钟才发现存不下太亏。"""
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
     torch.save(
         {
             "scorer": scorer.state_dict(),
@@ -160,46 +170,17 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
     )
 
 
-#: 特征扩充历史：{旧维度: (新特征插入的位置, 插入了几维)}。
-#: 用来把老权重迁移到当前特征上——新列全部补 0，等价于"这些特征不存在"，
-#: 所以迁移后的老模型行为和它当初训练时**逐位一致**，归档的对照结果仍然可复现。
-FEATURE_MIGRATIONS = {
-    40: (26, 2),  # 26/27 位插入 attach_rank_max / attach_rank_min
-}
-
-
-def _migrate_first_layer(state_dict: dict, old_dim: int) -> dict:
-    """把第一层权重从 `old_dim` 列扩到 FEATURE_DIM 列，新列填 0。"""
-    if old_dim not in FEATURE_MIGRATIONS:
-        raise ValueError(
-            f"模型是用 {old_dim} 维特征训练的，当前是 {FEATURE_DIM} 维，且没有对应的迁移规则，需要重训"
-        )
-
-    at, count = FEATURE_MIGRATIONS[old_dim]
-    if old_dim + count != FEATURE_DIM:
-        raise ValueError(f"迁移规则和当前特征维度对不上：{old_dim} + {count} != {FEATURE_DIM}")
-
-    key = "net.0.weight"
-    old = state_dict[key]
-    migrated = torch.zeros(old.shape[0], FEATURE_DIM, dtype=old.dtype)
-    migrated[:, :at] = old[:, :at]
-    migrated[:, at + count :] = old[:, at:]
-
-    state_dict = dict(state_dict)
-    state_dict[key] = migrated
-    return state_dict
-
-
 def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
-    """读取模型，返回可以直接对局的智能体。老特征维度的权重会自动迁移。"""
+    """读取模型，返回可以直接对局的智能体。"""
     blob = torch.load(path, map_location=device, weights_only=False)
+    if blob["feature_dim"] != FEATURE_DIM:
+        raise ValueError(
+            f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维，"
+            "特征改过了就得重训"
+        )
     # layers 是后加的字段，早期存的权重默认为 2 层
     scorer = MoveScorer(hidden=blob["hidden"], layers=blob.get("layers", 2)).to(device)
-
-    weights = blob["scorer"]
-    if blob["feature_dim"] != FEATURE_DIM:
-        weights = _migrate_first_layer(weights, blob["feature_dim"])
-    scorer.load_state_dict(weights)
+    scorer.load_state_dict(blob["scorer"])
     scorer.eval()
     return PolicyAgent(scorer, device=device, training=False)
 

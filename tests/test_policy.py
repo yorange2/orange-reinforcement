@@ -13,8 +13,7 @@ from paodekuai.combos import classify
 from paodekuai.features import (FEATURE_DIM, FEATURE_NAMES, STATE_OFFSET,
                                 attachment_ranks, batch_features)
 from paodekuai.game import Game, play_game
-from paodekuai.policy import (FEATURE_MIGRATIONS, MoveScorer, PolicyAgent,
-                              Step, ValueNet, _migrate_first_layer,
+from paodekuai.policy import (MoveScorer, PolicyAgent, Step, ValueNet,
                               discounted_returns, evaluate_batch, load_agent,
                               make_batch, save_agent)
 from tests.test_bots import observation
@@ -197,49 +196,95 @@ class TestAttachmentFeatures(unittest.TestCase):
         self.assertLess(rows[6], rows[13], "带小牌和带大牌的特征必须不同")
 
 
-class TestCheckpointMigration(unittest.TestCase):
-    """老特征维度的权重要能加载，而且行为必须逐位不变。"""
+class TestSamplingMode(unittest.TestCase):
+    def test_greedy_by_default(self):
+        agent = PolicyAgent(MoveScorer(hidden=16))
+        self.assertFalse(agent.sample)
+        obs = Game(rng=random.Random(2)).observe()
+        self.assertEqual({agent.choose(obs) for _ in range(20)}.__len__(), 1)
 
-    def test_migration_pads_the_new_columns_with_zeros(self):
-        old_dim = next(iter(FEATURE_MIGRATIONS))
-        at, count = FEATURE_MIGRATIONS[old_dim]
-        old = MoveScorer(dim=old_dim, hidden=8)
-        migrated = _migrate_first_layer(old.state_dict(), old_dim)["net.0.weight"]
+    def test_sampling_without_recording(self):
+        # 自我对弈的快照对手要有随机性，但不该产生轨迹
+        torch.manual_seed(0)
+        agent = PolicyAgent(MoveScorer(hidden=16), training=False, sample=True)
+        obs = Game(rng=random.Random(2)).observe()
+        picks = {agent.choose(obs) for _ in range(40)}
+        self.assertGreater(len(picks), 1, "sample=True 应该抽出不同的动作")
+        self.assertEqual(len(agent.trajectory), 0, "非训练模式不该记录轨迹")
 
-        self.assertEqual(migrated.shape, (8, FEATURE_DIM))
-        self.assertTrue((migrated[:, at : at + count] == 0).all())
-        torch.testing.assert_close(migrated[:, :at], old.net[0].weight[:, :at])
-        torch.testing.assert_close(migrated[:, at + count :], old.net[0].weight[:, at:])
+    def test_training_implies_sampling(self):
+        self.assertTrue(PolicyAgent(MoveScorer(hidden=16), training=True).sample)
 
-    def test_migrated_model_scores_exactly_the_same(self):
-        old_dim = next(iter(FEATURE_MIGRATIONS))
-        at, count = FEATURE_MIGRATIONS[old_dim]
-        old = MoveScorer(dim=old_dim, hidden=16)
-        for param in old.parameters():
-            torch.nn.init.normal_(param, std=0.4)
 
-        new = MoveScorer(hidden=16)
-        new.load_state_dict(_migrate_first_layer(old.state_dict(), old_dim))
+class TestOpponentPool(unittest.TestCase):
+    """自我对弈的对手池。"""
 
-        x_old = torch.randn(9, old_dim)
-        x_new = torch.zeros(9, FEATURE_DIM)
-        x_new[:, :at] = x_old[:, :at]
-        x_new[:, at + count :] = x_old[:, at:]
-        x_new[:, at : at + count] = torch.randn(9, count)  # 新特征取什么值都不该有影响
+    def make_pool(self, capacity=3, bot_ratio=0.0, snapshot_every=10):
+        return train_module.OpponentPool(
+            capacity=capacity, bot_ratio=bot_ratio, snapshot_every=snapshot_every,
+            rng=random.Random(0), device=torch.device("cpu"),
+        )
 
-        with torch.no_grad():
-            torch.testing.assert_close(new(x_new), old(x_old))
+    def test_snapshots_only_on_the_interval(self):
+        pool, scorer = self.make_pool(snapshot_every=10), MoveScorer(hidden=8)
+        self.assertFalse(pool.maybe_snapshot(7, scorer))
+        self.assertTrue(pool.maybe_snapshot(10, scorer))
+        self.assertEqual(len(pool.snapshots), 1)
 
-    def test_shipped_checkpoints_still_load(self):
-        for name in ("agent.pt", "ppo_small.pt", "reinforce_small.pt"):
-            path = os.path.join("models", name)
-            if os.path.exists(path):
-                agent = load_agent(path)
-                self.assertEqual(agent.scorer.net[0].in_features, FEATURE_DIM)
+    def test_oldest_snapshot_is_evicted_when_full(self):
+        pool, scorer = self.make_pool(capacity=3, snapshot_every=1), MoveScorer(hidden=8)
+        for episode in range(1, 8):
+            pool.maybe_snapshot(episode, scorer)
+        self.assertEqual(len(pool.snapshots), 3)
 
-    def test_unknown_feature_size_is_rejected(self):
-        with self.assertRaises(ValueError):
-            _migrate_first_layer({"net.0.weight": torch.zeros(4, 7)}, 7)
+    def test_snapshot_is_frozen_against_later_training(self):
+        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
+        pool.maybe_snapshot(1, scorer)
+        before = pool.snapshots[0].scorer.net[0].weight.clone()
+
+        with torch.no_grad():  # 之后继续训练，快照不该跟着变
+            scorer.net[0].weight.add_(5.0)
+
+        torch.testing.assert_close(pool.snapshots[0].scorer.net[0].weight, before)
+        self.assertFalse(any(p.requires_grad for p in pool.snapshots[0].scorer.parameters()))
+
+    def test_snapshot_opponents_sample_but_do_not_record(self):
+        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
+        pool.maybe_snapshot(1, scorer)
+        snapshot = pool.snapshots[0]
+        self.assertTrue(snapshot.sample)
+        self.assertFalse(snapshot.training)
+
+    def test_draw_always_returns_two_opponents(self):
+        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
+        pool.maybe_snapshot(1, scorer)
+        for _ in range(10):
+            self.assertEqual(len(pool.draw()), 2)
+
+    def test_empty_pool_falls_back_to_rule_bots(self):
+        pool = self.make_pool()
+        opponents = pool.draw()
+        self.assertEqual(len(opponents), 2)
+        self.assertFalse(any(isinstance(o, PolicyAgent) for o in opponents))
+
+    def test_bot_ratio_controls_the_mix(self):
+        scorer = MoveScorer(hidden=8)
+        all_bots = self.make_pool(bot_ratio=1.0, snapshot_every=1)
+        all_bots.maybe_snapshot(1, scorer)
+        self.assertFalse(any(isinstance(o, PolicyAgent) for o in all_bots.draw()))
+
+        all_self = self.make_pool(bot_ratio=0.0, snapshot_every=1)
+        all_self.maybe_snapshot(1, scorer)
+        self.assertTrue(all(isinstance(o, PolicyAgent) for o in all_self.draw()))
+
+    def test_self_play_training_runs(self):
+        args = train_module.parse_args(
+            ["--opponent", "self", "--episodes", "60", "--batch", "8", "--snapshot-every", "10",
+             "--eval-every", "0", "--hidden", "16", "--quiet"]
+        )
+        agent = train_module.train(args)
+        for param in agent.scorer.parameters():
+            self.assertTrue(torch.isfinite(param).all())
 
 
 class TestBatching(unittest.TestCase):
@@ -281,7 +326,8 @@ class TestBatching(unittest.TestCase):
         batched, _, _ = evaluate_batch(scorer, None, make_batch(steps))
 
         for i, step in enumerate(steps):
-            alone = torch.log_softmax(scorer(step.features), dim=0)[step.action]
+            with torch.no_grad():
+                alone = torch.log_softmax(scorer(step.features), dim=0)[step.action]
             self.assertAlmostEqual(float(batched[i]), float(alone), places=5)
 
     def test_value_head_reads_the_state_slice(self):
@@ -368,10 +414,12 @@ class TestReturnsAndCheckpoints(unittest.TestCase):
             self.assertEqual(agent.choose(obs), restored.choose(obs))
 
     def test_load_rejects_a_feature_size_mismatch(self):
+        # 特征改了就必须重训，不能悄悄加载出一个行为错乱的模型
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "bad.pt")
-            torch.save({"scorer": {}, "value": None, "hidden": 32, "feature_dim": 7, "meta": {}}, path)
-            with self.assertRaises(ValueError):
+            torch.save({"scorer": {}, "value": None, "hidden": 32,
+                        "feature_dim": FEATURE_DIM - 2, "meta": {}}, path)
+            with self.assertRaisesRegex(ValueError, "重训"):
                 load_agent(path)
 
 

@@ -16,12 +16,8 @@ htmlcov/
 .idea/
 .vscode/
 
-# 训练产物（README 里那组对照实验的权重单独放行）
+# 训练产物：只有正式权重进版本库，实验中间产物不进
 models/*.pt
 !models/agent.pt
-!models/ppo_small.pt
-!models/ppo_big.pt
-!models/reinforce_small.pt
-!models/reinforce_big.pt
 runs/
 *.log
