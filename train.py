@@ -109,13 +109,13 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     encoder = make_encoder(args.features)
     grid = encoder.grid_slice if args.conv else None
     scorer = MoveScorer(dim=encoder.dim, hidden=args.hidden, layers=args.layers,
-                        norm=args.norm, grid=grid).to(device)
+                        norm=args.norm, grid=grid, residual=args.residual).to(device)
     scorer.encoder_name = encoder.name
     if not args.quiet:
         print(f"输入: {encoder.name} 编码 {encoder.dim} 维"
               f"{'，点数网格走卷积' if grid else ''}")
-        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}，"
-              f"共 {scorer.n_params:,} 个参数")
+        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}"
+              f"{'，残差' if args.residual else ''}，共 {scorer.n_params:,} 个参数")
     value = ValueNet(dim=encoder.state_dim, norm=args.norm).to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
@@ -236,6 +236,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
     parser.add_argument("--features", default="handcrafted", choices=list(ENCODERS),
                         help="输入编码：handcrafted=手工特征，raw=原始点数网格，both=两者拼接")
+    parser.add_argument("--residual", action="store_true",
+                        help="隐藏层用残差块 x + f(x)")
     parser.add_argument("--conv", action="store_true",
                         help="原始编码的点数网格走一维卷积（慢 30 倍以上，默认展平进 MLP）")
     parser.add_argument("--norm", default="layer", choices=list(NORMS),

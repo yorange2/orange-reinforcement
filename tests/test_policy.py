@@ -232,6 +232,40 @@ class TestNormalization(unittest.TestCase):
             self.assertTrue(torch.isfinite(param).all())
 
 
+class TestResidual(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertFalse(MoveScorer().residual)
+        self.assertFalse(train_module.parse_args([]).residual)
+
+    def test_residual_blocks_replace_the_plain_hidden_layers(self):
+        from paodekuai.policy import ResidualBlock
+
+        scorer = MoveScorer(hidden=16, layers=4, residual=True)
+        self.assertEqual(sum(isinstance(b, ResidualBlock) for b in scorer.net), 3)
+        # 第一层要把输入投到 hidden 宽，维度不一致没法做残差
+        self.assertIsInstance(scorer.net[0], torch.nn.Linear)
+
+    def test_costs_no_extra_parameters(self):
+        plain = MoveScorer(hidden=32, layers=3, residual=False)
+        residual = MoveScorer(hidden=32, layers=3, residual=True)
+        self.assertEqual(plain.n_params, residual.n_params)
+
+    def test_block_adds_the_input_back(self):
+        from paodekuai.policy import ResidualBlock
+
+        block = ResidualBlock(8, "none").eval()
+        x = torch.randn(3, 8)
+        with torch.no_grad():
+            torch.testing.assert_close(block(x) - x, block.body(x))
+
+    def test_checkpoint_remembers_it(self):
+        scorer = MoveScorer(hidden=16, layers=3, residual=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "res.pt")
+            save_agent(path, scorer)
+            self.assertTrue(load_agent(path).scorer.residual)
+
+
 class TestAttachmentFeatures(unittest.TestCase):
     """带牌的点数：少了这两维，"QQQ 带 6" 和 "QQQ 带 K" 在网络眼里完全一样。"""
 

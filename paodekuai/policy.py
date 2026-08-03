@@ -48,6 +48,17 @@ def make_norm(norm: str, width: int) -> List[nn.Module]:
     raise ValueError(f"未知的归一化方式 {norm!r}，可选: {', '.join(NORMS)}")
 
 
+class ResidualBlock(nn.Module):
+    """x + f(x)。梯度可以顺着这条恒等路径直通，深一点的网络才好训。"""
+
+    def __init__(self, width: int, norm: str) -> None:
+        super().__init__()
+        self.body = nn.Sequential(nn.Linear(width, width), *make_norm(norm, width), nn.ReLU())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.body(x)
+
+
 class MoveScorer(nn.Module):
     """给单个候选动作打分。输入 (动作数, dim)，输出 (动作数,)。
 
@@ -68,6 +79,7 @@ class MoveScorer(nn.Module):
         grid: Optional[Tuple[int, int]] = None,
         grid_channels: int = 6,
         conv_channels: int = 32,
+        residual: bool = False,
     ) -> None:
         super().__init__()
         if layers < 1:
@@ -77,6 +89,7 @@ class MoveScorer(nn.Module):
         self.hidden = hidden
         self.layers = layers
         self.norm = norm
+        self.residual = residual
         self.grid = grid
         self.grid_channels = grid_channels
         self.conv_channels = conv_channels
@@ -98,13 +111,13 @@ class MoveScorer(nn.Module):
             # 网格换成卷积输出，其余维度原样拼在后面
             mlp_in = dim - (end - start) + conv_channels * n_ranks
 
-        blocks: List[nn.Module] = []
-        in_dim = mlp_in
-        for _ in range(layers):
-            blocks.append(nn.Linear(in_dim, hidden))
-            blocks.extend(make_norm(norm, hidden))
-            blocks.append(nn.ReLU())
-            in_dim = hidden
+        # 第一层要把输入投到 hidden 宽，维度不一致没法做残差
+        blocks: List[nn.Module] = [nn.Linear(mlp_in, hidden), *make_norm(norm, hidden), nn.ReLU()]
+        for _ in range(layers - 1):
+            if residual:
+                blocks.append(ResidualBlock(hidden, norm))
+            else:
+                blocks += [nn.Linear(hidden, hidden), *make_norm(norm, hidden), nn.ReLU()]
         blocks.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*blocks)
 
@@ -237,6 +250,7 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None, 
             "norm": scorer.norm,
             "encoder": getattr(scorer, "encoder_name", "handcrafted"),
             "conv": scorer.grid is not None,
+            "residual": scorer.residual,
             "feature_dim": scorer.dim,
             "meta": meta or {},
         },
@@ -260,6 +274,7 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
         dim=encoder.dim, hidden=blob["hidden"], layers=blob.get("layers", 2),
         norm=blob.get("norm", "none"),
         grid=encoder.grid_slice if blob.get("conv", False) else None,
+        residual=blob.get("residual", False),
     ).to(device)
     scorer.encoder_name = encoder.name
     scorer.load_state_dict(blob["scorer"])
