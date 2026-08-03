@@ -47,11 +47,14 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     rng = random.Random(args.seed)
     device = torch.device(args.device)
 
-    scorer = MoveScorer(hidden=args.hidden, layers=args.layers, norm=args.norm).to(device)
+    scorer = MoveScorer(hidden=args.hidden, layers=args.layers, norm=args.norm,
+                        residual=args.residual).to(device)
     if not args.quiet:
-        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}，"
+        res_str = " + 残差" if args.residual else ""
+        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}{res_str}，"
               f"共 {scorer.n_params:,} 个参数")
-    value = ValueNet(hidden=args.hidden // 2, layers=args.layers, norm=args.norm).to(device)
+    value = ValueNet(hidden=args.hidden // 2, layers=args.layers, norm=args.norm,
+                     residual=args.residual).to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
     )
@@ -151,6 +154,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
     parser.add_argument("--norm", default="layer", choices=list(NORMS),
                         help="归一化方式（默认 layer）")
+    parser.add_argument("--residual", action="store_true", help="隐藏层之间加残差连接")
     parser.add_argument("--batch", type=int, default=8, help="多少局更新一次")
     parser.add_argument("--entropy-coef", type=float, default=0.01, help="熵奖励系数")
     parser.add_argument("--value-coef", type=float, default=0.5, help="价值损失系数")
