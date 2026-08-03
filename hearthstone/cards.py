@@ -51,19 +51,25 @@ INERT_KEYWORDS: Tuple[str, ...] = (ELUSIVE, SPELL_DAMAGE)
 
 
 class CardDef(NamedTuple):
-    """一张卡。`spell` 为真时是法术（这版只有幸运币一张）。"""
+    """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。"""
 
     name: str
     cost: int
     attack: int = 0
-    health: int = 0
+    health: int = 0          # 随从是血量，武器是耐久度
     keywords: Tuple[str, ...] = ()
     spell: bool = False
+    weapon: bool = False
 
     @property
     def stats(self) -> int:
-        """攻血总和，衡量随从体量最粗糙的一个数。"""
+        """攻 + 血/耐久，衡量体量最粗糙的一个数。"""
         return self.attack + self.health
+
+    @property
+    def durability(self) -> int:
+        """武器耐久度——和 health 是同一个字段，这个别名让调用方更可读。"""
+        return self.health
 
     def has(self, keyword: str) -> bool:
         return keyword in self.keywords
@@ -75,6 +81,9 @@ class CardDef(NamedTuple):
     def __str__(self) -> str:
         if self.spell:
             return f"{self.name}({self.cost}费)"
+        if self.weapon:
+            tail = f" {self.text}" if self.keywords else ""
+            return f"{self.name}({self.cost}费 {self.attack}/{self.durability}{tail})"
         tail = f" {self.text}" if self.keywords else ""
         return f"{self.name}({self.cost}费 {self.attack}/{self.health}{tail})"
 
@@ -87,9 +96,18 @@ def _m(name: str, cost: int, attack: int, health: int, *keywords: str) -> CardDe
     return CardDef(name, cost, attack, health, tuple(keywords))
 
 
+def _w(name: str, cost: int, attack: int, durability: int) -> CardDef:
+    return CardDef(name, cost, attack, durability, weapon=True)
+
+
 #: 卡池，按费用排序。索引即卡牌 id，编码特征时可以直接用。
 POOL: List[CardDef] = [
-    # ---- 白板：卡面一个字都没有
+    # ---- 武器：纯白板，只有攻/耐久
+    _w("圣光的正义", 1, 1, 4),
+    _w("炽炎战斧", 2, 3, 2),
+    _w("刺客之刃", 4, 2, 5),
+    _w("奥金斧", 5, 5, 2),
+    # ---- 白板随从：卡面一个字都没有
     _m("幽灵", 0, 1, 1),
     _m("鱼人袭击者", 1, 2, 1),
     _m("血沼迅猛龙", 2, 3, 2),

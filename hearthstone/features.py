@@ -14,7 +14,7 @@ from typing import List
 import numpy as np
 
 from .cards import KEYWORDS
-from .game import ATTACK, END, HERO, PLAY, Action, Observation
+from .game import ATTACK, END, HERO, HERO_SOURCE, PLAY, Action, Observation
 
 N_KEYWORDS = len(KEYWORDS)
 
@@ -33,13 +33,14 @@ ACTION_DIM = A_TYPE + A_CARD + A_ATTACKER + A_TARGET + A_TRADE + A_PLAY_EFFECT +
 
 # 局面特征
 S_BASE = 1 + 1 + 1 + 1 + 1    # 水晶、血量
+S_WEAPON = 5                    # 武器：自己攻/耐久/已攻击 + 对方攻/耐久
 S_HAND = 1 + 1 + 2 + 1 + 1 + 1  # 手牌：张数 + 可出数 + 可出总攻/总血 + 有冲锋/有嘲讽/有突袭
 S_BOARD = 2 + 2 + 2 + 1        # 场面：随从数 + 总攻 + 总血 + 嘲讽挡脸
 S_KEYWORDS = 4 + 4              # 双方场上关键词计数（剧毒/吸血/风怒/复生）
 S_LETHAL = 2                    # 斩杀检测
 S_OTHER = 1 + 1 + 1 + 1 + 1     # 牌堆/对手手牌/疲劳/bias/先后手
 
-STATE_DIM = S_BASE + S_HAND + S_BOARD + S_KEYWORDS + S_LETHAL + S_OTHER
+STATE_DIM = S_BASE + S_WEAPON + S_HAND + S_BOARD + S_KEYWORDS + S_LETHAL + S_OTHER
 
 STATE_OFFSET = ACTION_DIM
 FEATURE_DIM = ACTION_DIM + STATE_DIM
@@ -107,6 +108,9 @@ def _play(obs: Observation, action: Action) -> List[float]:
 
 
 def _attack(obs: Observation, action: Action) -> List[float]:
+    if action.source == HERO_SOURCE:
+        return _hero_attack_features(obs, action)
+
     att = obs.board[action.source]
     target_is_hero = action.target == HERO
 
@@ -181,6 +185,54 @@ def _attack(obs: Observation, action: Action) -> List[float]:
     return feats
 
 
+def _hero_attack_features(obs: Observation, action: Action) -> List[float]:
+    """英雄拿武器攻击时的特征。"""
+    weapon_atk = obs.hero_weapon_attack
+    target_is_hero = action.target == HERO
+
+    if target_is_hero:
+        def_atk, def_hp = 0.0, 0.0
+        def_taunt, def_shield, def_poison = 0.0, 0.0, 0.0
+        def_reborn, def_lifesteal = 0.0, 0.0
+        kills_def, kills_att = 0.0, 0.0
+        overkill = 0.0
+        board_after = (sum(m.attack for m in obs.board)
+                       - sum(m.attack for m in obs.enemy_board)) / 20.0
+    else:
+        defender = obs.enemy_board[action.target]
+        def_atk = defender.attack / 10.0
+        def_hp = defender.health / 10.0
+        def_taunt = 1.0 if defender.taunting else 0.0
+        def_shield = 1.0 if defender.divine_shield else 0.0
+        def_poison = 1.0 if defender.has("剧毒") else 0.0
+        def_reborn = 1.0 if defender.reborn else 0.0
+        def_lifesteal = 1.0 if defender.has("吸血") else 0.0
+        def_eff_hp = defender.health + (1 if defender.divine_shield else 0)
+        kills_def = 1.0 if weapon_atk >= def_eff_hp else 0.0
+        kills_att = 0.0  # 英雄不会因为攻击随从死亡
+        overkill = max(0.0, weapon_atk - def_eff_hp) / 5.0
+        my_rest = sum(m.attack for m in obs.board)
+        en_rest = sum(m.attack for m in obs.enemy_board if m.uid != defender.uid)
+        board_after = (my_rest - en_rest) / 20.0
+
+    feats = [
+        0.0, 1.0, 0.0,    # 类型：attack
+        0.0, 0.0, 0.0,     # 卡牌
+        *([0.0] * N_KEYWORDS),
+        weapon_atk / 10.0,  # 攻击者（武器攻击）
+        0.0,                # 攻击者血量（英雄血量在局面里）
+        0.0, 1.0 if weapon_atk > 0 else 0.0, 0.0, 0.0, 0.0,  # 圣盾/剧毒/吸血/风怒
+        1.0 if target_is_hero else 0.0,
+        def_atk, def_hp,
+        def_taunt, def_shield, def_poison,
+        kills_def, kills_att, overkill, board_after,
+        def_reborn, def_lifesteal,
+        0.0, 0.0,            # 复生/冲锋突袭（英雄没有）
+        0.0, 0.0, 0.0,       # 出牌效果
+    ]
+    return feats
+
+
 def _end() -> List[float]:
     feats = [
         0.0, 0.0, 1.0,
@@ -232,6 +284,12 @@ def _state_features(obs: Observation) -> List[float]:
         obs.hero_health / 30.0,
         obs.enemy_hero_health / 30.0,
         obs.fatigue / 10.0,
+        # 武器
+        obs.hero_weapon_attack / 10.0,
+        obs.hero_weapon_durability / 5.0,
+        1.0 if obs.hero_attacked else 0.0,
+        obs.enemy_weapon_attack / 10.0,
+        obs.enemy_weapon_durability / 5.0,
         # 手牌质量
         len(obs.hand) / 10.0,
         len(playable) / 6.0,

@@ -16,6 +16,7 @@ from .game import (
     ATTACK,
     END_TURN,
     HERO,
+    HERO_SOURCE,
     PLAY,
     Action,
     Game,
@@ -23,6 +24,7 @@ from .game import (
     Observation,
     attack,
     describe,
+    hero_attack,
     play,
 )
 
@@ -40,16 +42,18 @@ def render(obs: Observation, hide_hand: bool = False) -> str:
     )
     lines.append("-" * WIDTH)
 
+    en_weapon = f" 武器 {obs.enemy_weapon_attack}/{obs.enemy_weapon_durability}" if obs.enemy_weapon_attack else ""
     lines.append(
-        f"  对手   英雄 {obs.enemy_hero_health:>3}    "
+        f"  对手   英雄 {obs.enemy_hero_health:>3}{en_weapon}    "
         f"手牌 {obs.enemy_hand_size:>2}    牌堆 {obs.enemy_deck_size:>2}"
         + (f"    疲劳 {obs.enemy_fatigue}" if obs.enemy_fatigue else "")
     )
     lines.append("    场上 " + _board_str(obs.enemy_board))
     lines.append("  " + "· " * ((WIDTH - 4) // 2))
     lines.append("    场上 " + _board_str(obs.board))
+    my_weapon = f" 武器 {obs.hero_weapon_attack}/{obs.hero_weapon_durability}" if obs.hero_weapon_attack else ""
     lines.append(
-        f"  自己   英雄 {obs.hero_health:>3}    "
+        f"  自己   英雄 {obs.hero_health:>3}{my_weapon}    "
         f"手牌 {len(obs.hand):>2}    牌堆 {obs.deck_size:>2}"
         + (f"    疲劳 {obs.fatigue}" if obs.fatigue else "")
     )
@@ -112,6 +116,8 @@ HELP = """
   p 2         出手牌 2 号
   a 0 1       用自己 0 号随从攻击对方 1 号随从
   a 0 f       用自己 0 号随从打脸
+  w f         英雄用武器打脸
+  w 1         英雄攻击对方 1 号随从
   e           结束回合
   ?           重新列一遍候选
   q           退出
@@ -144,6 +150,16 @@ def parse_input(text: str, obs: Observation) -> Optional[Action]:
                 raise ValueError(f"看不懂目标 {parts[2]!r}")
             target = int(parts[2])
         return attack(int(parts[1]), target)
+
+    if head in ("w", "weapon"):
+        if len(parts) != 2:
+            raise ValueError("武器攻击写成 `w <对方随从|f>`")
+        target = HERO if parts[1] in ("f", "face", "h", "hero") else None
+        if target is None:
+            if not parts[1].isdigit():
+                raise ValueError(f"看不懂目标 {parts[1]!r}")
+            target = int(parts[1])
+        return hero_attack(target)
 
     if head.isdigit():
         index = int(head)
