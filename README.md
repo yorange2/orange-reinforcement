@@ -156,6 +156,25 @@ python3 -m venv .venv
 
 仓库里带了训练好的正式权重 `models/agent.pt`（95 KB），可以直接用。
 
+## 在线试玩
+
+**<https://yorange2.github.io/orange-reinforcement/>** —— 打开就能跟模型对战，不用装任何东西。
+
+模型权重导出成 JSON（209 KB），游戏引擎、特征、网络前向全部在浏览器本地跑，不联网。
+每步都能看到模型对每个候选的打分。
+
+网页版把 Python 的引擎重写了一遍 JS，这是有风险的——合法牌的枚举顺序、特征的每一维、
+手牌拆解的贪心步骤，差一点模型的判断就变了。所以有一道**一致性核对**卡着：
+
+```bash
+python tools/parity_export.py     # 从真实对局导出上千个局面
+node tools/parity_check.mjs       # JS 重算，逐项比对
+```
+
+拿 1567 个真实局面、7206 个候选动作核对下来，**合法动作、42 维特征、网络打分三项全部一致**
+（特征最大偏差 5e-7，打分 1.4e-4，后者来自权重导出时保留 6 位小数）。这道核对也接在
+`python -m unittest` 里，装了 node 就会自动跑。
+
 ## 上手玩一局，顺便看模型在想什么
 
 ```bash
@@ -362,10 +381,13 @@ paodekuai/
   policy.py     打分网络、价值网络、智能体、变长动作集的批量打分、存取权重
   arena.py      对局评测与胜率统计
 train.py        训练脚本（含定期评测）
+export_weights.py  把权重导出成网页版用的 JSON
+docs/           GitHub Pages 上的网页版（engine.js 是引擎的 JS 移植）
+tools/          Python 与 JS 的一致性核对
 bench.py        统一口径的胜率基准表
 duel.py         三方混战：任意三个选手同桌，每副牌打满 6 种座位排列
 play.py         人机对战 / 观战
-tests/          142 个单元测试
+tests/          149 个单元测试
 models/agent.pt 正式权重：PPO + 42 维特征 + LayerNorm + 12 万局对 rule 训练，2 层 x 128 宽
 ```
 
@@ -400,7 +422,7 @@ models/agent.pt 正式权重：PPO + 42 维特征 + LayerNorm + 12 万局对 rul
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-142 个测试，约 3 秒。除了常规的牌型和引擎规则，有五个值得一提：
+149 个测试，约 3 秒。除了常规的牌型和引擎规则，有五个值得一提：
 
 - **牌型往返一致性**：随机发几百手牌，枚举出的每一个合法动作都要能被 `classify()`
   反向识别成同样的牌型、点数和连长——生成器和识别器互相验证。
