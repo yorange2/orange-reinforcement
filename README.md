@@ -2,6 +2,11 @@
 
 从零实现三人**跑得快**，再用强化学习训练一个策略网络，去打赢手写的规则算法。
 
+### 👉 [在线试玩：yorange2.github.io/orange-reinforcement](https://yorange2.github.io/orange-reinforcement/)
+
+打开就能跟模型对战，不用装任何东西。每步都能看到它对每手牌的打分。
+（[实现细节](#在线试玩)）
+
 牌型、引擎、规则对手、特征、训练、人机对战全都在这个仓库里，没有外部游戏环境依赖，
 只需要 `torch` 和 `numpy`。
 
@@ -158,10 +163,8 @@ python3 -m venv .venv
 
 ## 在线试玩
 
-**<https://yorange2.github.io/orange-reinforcement/>** —— 打开就能跟模型对战，不用装任何东西。
-
-模型权重导出成 JSON（209 KB），游戏引擎、特征、网络前向全部在浏览器本地跑，不联网。
-每步都能看到模型对每个候选的打分。
+网页版在 <https://yorange2.github.io/orange-reinforcement/>。模型权重导出成 JSON（209 KB），
+游戏引擎、特征、网络前向全部在浏览器本地跑，不联网也没有后端。
 
 网页版把 Python 的引擎重写了一遍 JS，这是有风险的——合法牌的枚举顺序、特征的每一维、
 手牌拆解的贪心步骤，差一点模型的判断就变了。所以有一道**一致性核对**卡着：
