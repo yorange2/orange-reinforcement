@@ -51,7 +51,7 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     if not args.quiet:
         print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}，"
               f"共 {scorer.n_params:,} 个参数")
-    value = ValueNet(norm=args.norm).to(device)
+    value = ValueNet(hidden=args.hidden // 2, layers=args.layers, norm=args.norm).to(device)
     optimizer = torch.optim.Adam(
         list(scorer.parameters()) + list(value.parameters()), lr=args.lr
     )

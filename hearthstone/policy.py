@@ -69,14 +69,17 @@ class MoveScorer(nn.Module):
 class ValueNet(nn.Module):
     """估计当前局面的期望回报，用作基线。"""
 
-    def __init__(self, dim: int = STATE_DIM, hidden: int = 64, norm: str = "layer") -> None:
+    def __init__(self, dim: int = STATE_DIM, hidden: int = 64, layers: int = 1, norm: str = "layer") -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden),
-            *make_norm(norm, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1),
-        )
+        blocks: List[nn.Module] = []
+        in_dim = dim
+        for _ in range(layers):
+            blocks.append(nn.Linear(in_dim, hidden))
+            blocks.extend(make_norm(norm, hidden))
+            blocks.append(nn.ReLU())
+            in_dim = hidden
+        blocks.append(nn.Linear(hidden, 1))
+        self.net = nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
