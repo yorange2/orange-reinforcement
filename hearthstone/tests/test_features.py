@@ -91,7 +91,7 @@ class TestStateFeatures(unittest.TestCase):
         self.assertEqual(feats[-1], 1.0)
 
     def test_board_slots_padding(self):
-        """少于 3 个随从时后面补零。"""
+        """少于 7 个随从时后面补零。"""
         game = Game(rng=random.Random(0))
         game.boards[0] = []  # empty board
         game.boards[1] = []
@@ -102,28 +102,34 @@ class TestStateFeatures(unittest.TestCase):
         board_slots = feats[slot_start:slot_start + S_BOARD_SLOTS]
         self.assertEqual(board_slots, [0.0] * S_BOARD_SLOTS)
 
-    def test_board_slots_sorted_by_attack(self):
-        """逐随从编码按攻击力降序排列。"""
+    def test_board_slots_sorted_by_uid(self):
+        """逐随从编码按出场顺序（uid）排列，7 槽 7 维。"""
         from hearthstone.cards import CardDef
         from hearthstone.game import Minion
 
         game = Game(rng=random.Random(0))
-        # 造三个不同攻击力的随从放在自己场上
-        m1 = Minion.summon(CardDef("a", 1, 1, 1, ()), uid=1)
-        m2 = Minion.summon(CardDef("b", 1, 5, 1, ()), uid=2)
-        m3 = Minion.summon(CardDef("c", 1, 3, 1, ()), uid=3)
-        game.boards[0] = [m1, m2, m3]  # attack: 1, 5, 3
+        # 造三个随从，乱序放入场上
+        m1 = Minion.summon(CardDef("a", 1, 1, 1, ()), uid=10)
+        m2 = Minion.summon(CardDef("b", 1, 5, 1, ()), uid=5)
+        m3 = Minion.summon(CardDef("c", 1, 3, 1, ("剧毒",)), uid=20)
+        game.boards[0] = [m1, m2, m3]  # attack: 1, 5, 3; uid: 10, 5, 20
         game.boards[1] = []
         obs = game.observe()
         feats = state_features(obs)
 
         from hearthstone.features import S_BASE, S_WEAPON, S_HAND, S_HAND_CARDS, S_SPELLS, S_BOARD
         slot_start = S_BASE + S_WEAPON + S_HAND + S_HAND_CARDS + S_SPELLS + S_BOARD
-        # 我方前 3 槽（每槽 5 维），第一槽应为攻击力 5
-        my_slots = feats[slot_start:slot_start + 15]
-        self.assertAlmostEqual(my_slots[0], 5 / 10.0)   # atk of highest
-        self.assertAlmostEqual(my_slots[5], 3 / 10.0)   # atk of second
-        self.assertAlmostEqual(my_slots[10], 1 / 10.0)  # atk of third
+        STRIDE = 7
+        my_slots = feats[slot_start:slot_start + STRIDE * 7]
+        # uid 升序：5, 10, 20 → slot 0 = uid=5 (atk=5), slot 1 = uid=10 (atk=1), slot 2 = uid=20 (atk=3)
+        self.assertAlmostEqual(my_slots[0], 5 / 10.0)              # uid=5 atk
+        self.assertAlmostEqual(my_slots[STRIDE], 1 / 10.0)         # uid=10 atk
+        self.assertAlmostEqual(my_slots[STRIDE * 2], 3 / 10.0)     # uid=20 atk
+        # slot 3~6 补零
+        for i in range(3, 7):
+            self.assertEqual(my_slots[STRIDE * i:STRIDE * (i + 1)], [0.0] * STRIDE)
+        # uid=20 有剧毒标志位
+        self.assertEqual(my_slots[STRIDE * 2 + 5], 1.0)  # poisonous
 
     def test_hand_cards_sorted_by_cost(self):
         """手牌逐卡编码按费用升序排列。"""

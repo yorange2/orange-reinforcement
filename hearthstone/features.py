@@ -42,7 +42,7 @@ S_BASE = 1 + 1 + 1 + 1 + 1    # 水晶、血量
 S_WEAPON = 5                    # 武器：自己攻/耐久/已攻击 + 对方攻/耐久
 S_HAND = 1 + 1 + 2 + 1 + 1 + 1  # 手牌：张数 + 可出数 + 可出总攻/总血 + 有冲锋/有嘲讽/有突袭
 S_BOARD = 2 + 2 + 2 + 1        # 场面：随从数 + 总攻 + 总血 + 嘲讽挡脸
-S_BOARD_SLOTS = 5 * 3 + 5 * 3  # 双方场上逐随从（各前3大）：攻/血/能动/嘲讽/圣盾
+S_BOARD_SLOTS = 7 * 7 + 7 * 7  # 双方场上逐随从（各7槽全覆盖）：攻/血/能动/嘲讽/圣盾/剧毒/吸血
 S_HAND_CARDS = 5 * 3           # 手牌逐卡（前3低费可出）：费/攻/血/冲锋/突袭
 S_SPELLS = 3                    # 法术感知：直伤/AOE/硬解
 S_KEYWORDS = 4 + 4              # 双方场上关键词计数（剧毒/吸血/风怒/复生）
@@ -279,25 +279,31 @@ def _end() -> List[float]:
 # ---------------------------------------------------------------- 局面
 
 def _board_slot_feature(m: "Minion") -> List[float]:
-    """单个随从的 5 维紧凑编码：攻/血/能动/嘲讽/圣盾。"""
+    """单个随从的 7 维编码：攻/血/能动/嘲讽/圣盾/剧毒/吸血。"""
     return [
         m.attack / 10.0,
         m.health / 10.0,
         1.0 if m.can_attack else 0.0,
         1.0 if m.taunting else 0.0,
         1.0 if m.divine_shield else 0.0,
+        1.0 if m.has("剧毒") else 0.0,
+        1.0 if m.has("吸血") else 0.0,
     ]
 
 
-def _board_slots(board: List["Minion"], n: int = 3) -> List[float]:
-    """场上攻击力最高的 n 个随从的编码，不足补零。"""
-    sorted_board = sorted(board, key=lambda m: (m.attack, m.health), reverse=True)
+def _board_slots(board: List["Minion"], n: int = 7) -> List[float]:
+    """场上按出场顺序的前 n 个随从的编码，不足补零。
+
+    7 槽全覆盖（BOARD_LIMIT=7），按 uid 升序（出场顺序）——
+    随从在存活期间槽位不变，模型可稳定追踪。
+    """
+    sorted_board = sorted(board, key=lambda m: m.uid)
     feats: List[float] = []
     for i in range(n):
         if i < len(sorted_board):
             feats.extend(_board_slot_feature(sorted_board[i]))
         else:
-            feats.extend([0.0] * 5)
+            feats.extend([0.0] * 7)
     return feats
 
 
