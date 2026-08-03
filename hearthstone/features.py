@@ -5,6 +5,12 @@ v2：比初版加了约 20 维，集中在四个地方——
 2. 手牌质量（不只看有几张，还看能出什么）
 3. 场上关键词分布（剧毒、吸血、复生严重影响交易决策）
 4. 斩杀检测（自己和对手分别能不能在下一次攻击中结束比赛）
+
+v3：从 81 维升到 129 维（+48 维局面特征），打破纯聚合编码——
+5. 逐随从编码（双方场上各前 3 大随从的攻/血/能动/嘲讽/圣盾）
+6. 逐手牌编码（可出牌中前 3 低费的费/攻/血/冲锋/突袭）
+7. 法术感知（手牌中是否有直伤/AOE/硬解）
+8. 先后手改为 Observation 显式字段，不再用牌堆差推断
 """
 
 from __future__ import annotations
@@ -36,11 +42,14 @@ S_BASE = 1 + 1 + 1 + 1 + 1    # 水晶、血量
 S_WEAPON = 5                    # 武器：自己攻/耐久/已攻击 + 对方攻/耐久
 S_HAND = 1 + 1 + 2 + 1 + 1 + 1  # 手牌：张数 + 可出数 + 可出总攻/总血 + 有冲锋/有嘲讽/有突袭
 S_BOARD = 2 + 2 + 2 + 1        # 场面：随从数 + 总攻 + 总血 + 嘲讽挡脸
+S_BOARD_SLOTS = 5 * 3 + 5 * 3  # 双方场上逐随从（各前3大）：攻/血/能动/嘲讽/圣盾
+S_HAND_CARDS = 5 * 3           # 手牌逐卡（前3低费可出）：费/攻/血/冲锋/突袭
+S_SPELLS = 3                    # 法术感知：直伤/AOE/硬解
 S_KEYWORDS = 4 + 4              # 双方场上关键词计数（剧毒/吸血/风怒/复生）
 S_LETHAL = 2                    # 斩杀检测
 S_OTHER = 1 + 1 + 1 + 1 + 1     # 牌堆/对手手牌/疲劳/bias/先后手
 
-STATE_DIM = S_BASE + S_WEAPON + S_HAND + S_BOARD + S_KEYWORDS + S_LETHAL + S_OTHER
+STATE_DIM = S_BASE + S_WEAPON + S_HAND + S_BOARD + S_BOARD_SLOTS + S_HAND_CARDS + S_SPELLS + S_KEYWORDS + S_LETHAL + S_OTHER
 
 STATE_OFFSET = ACTION_DIM
 FEATURE_DIM = ACTION_DIM + STATE_DIM
@@ -269,6 +278,75 @@ def _end() -> List[float]:
 
 # ---------------------------------------------------------------- 局面
 
+def _board_slot_feature(m: "Minion") -> List[float]:
+    """单个随从的 5 维紧凑编码：攻/血/能动/嘲讽/圣盾。"""
+    return [
+        m.attack / 10.0,
+        m.health / 10.0,
+        1.0 if m.can_attack else 0.0,
+        1.0 if m.taunting else 0.0,
+        1.0 if m.divine_shield else 0.0,
+    ]
+
+
+def _board_slots(board: List["Minion"], n: int = 3) -> List[float]:
+    """场上攻击力最高的 n 个随从的编码，不足补零。"""
+    sorted_board = sorted(board, key=lambda m: (m.attack, m.health), reverse=True)
+    feats: List[float] = []
+    for i in range(n):
+        if i < len(sorted_board):
+            feats.extend(_board_slot_feature(sorted_board[i]))
+        else:
+            feats.extend([0.0] * 5)
+    return feats
+
+
+def _hand_card_feature(card) -> List[float]:
+    """手牌中单张可出牌的 5 维编码：费/攻/血/冲锋/突袭。"""
+    return [
+        card.cost / 10.0,
+        card.attack / 10.0,
+        card.health / 10.0,
+        1.0 if card.has("冲锋") else 0.0,
+        1.0 if card.has("突袭") else 0.0,
+    ]
+
+
+def _hand_cards(obs: Observation, n: int = 3) -> List[float]:
+    """可出牌中费用最低的 n 张的编码，不足补零。"""
+    playable = obs.playable()
+    cards = [obs.hand[a.source] for a in playable]
+    sorted_cards = sorted(cards, key=lambda c: (c.cost, -(c.attack + c.health)))
+    feats: List[float] = []
+    for i in range(n):
+        if i < len(sorted_cards):
+            feats.extend(_hand_card_feature(sorted_cards[i]))
+        else:
+            feats.extend([0.0] * 5)
+    return feats
+
+
+def _spell_awareness(obs: Observation) -> List[float]:
+    """可出牌中是否有直伤/AOE/硬解法术。"""
+    playable = obs.playable()
+    cards = [obs.hand[a.source] for a in playable]
+    has_damage = any(c.spell_damage > 0 or c.spell_missiles > 0 for c in cards)
+    has_aoe = any(
+        c.spell_aoe_enemy_minions > 0 or c.spell_aoe_all_enemies > 0
+        or c.spell_aoe_all > 0 or c.spell_splash > 0
+        for c in cards
+    )
+    has_removal = any(
+        c.spell_transform or c.spell_destroy_all or c.spell_brawl
+        for c in cards
+    )
+    return [
+        1.0 if has_damage else 0.0,
+        1.0 if has_aoe else 0.0,
+        1.0 if has_removal else 0.0,
+    ]
+
+
 def _state_features(obs: Observation) -> List[float]:
     my = obs.board
     en = obs.enemy_board
@@ -285,18 +363,8 @@ def _state_features(obs: Observation) -> List[float]:
     i_have_lethal = 1.0 if _can_kill(obs, obs.player) else 0.0
     opp_has_lethal = 1.0 if _can_kill(obs, obs.opponent) else 0.0
 
-    # 先后手（通过水晶差推断：第一个回合 mana 上限都是 1，但后手有幸运币
-    # 所以看 mana 上限 + 手牌中是否有幸运币来推）
-    going_first = 1.0 if obs.max_mana == obs.turn // 2 + 1 else 0.0
-    # 更简单的推断：先手 max_mana ≈ (turn+2)//2，后手 max_mana ≈ (turn+1)//2
-    # 直接用 deck_size 差：后手起手多一张，牌堆少一张
-    # 最准的：先手牌堆 = 后手牌堆 + 1（开局时），中期牌堆差接近 1
-    if obs.deck_size > obs.enemy_deck_size:
-        going_first = 1.0
-    elif obs.deck_size < obs.enemy_deck_size:
-        going_first = 0.0
-    else:
-        going_first = 0.5
+    # 先后手（直接用 Observation 的显式字段）
+    going_first = 1.0 if obs.going_first else 0.0
 
     return [
         # 水晶血量
@@ -319,6 +387,10 @@ def _state_features(obs: Observation) -> List[float]:
         has_charge,
         has_taunt,
         has_rush,
+        # 手牌逐卡（前 3 低费可出）
+        *_hand_cards(obs),
+        # 法术感知
+        *_spell_awareness(obs),
         # 场面大小
         len(my) / 7.0,
         len(en) / 7.0,
@@ -327,6 +399,9 @@ def _state_features(obs: Observation) -> List[float]:
         sum(m.health for m in my) / 30.0,
         sum(m.health for m in en) / 30.0,
         1.0 if obs.enemy_taunts() else 0.0,
+        # 双方场上逐随从（各前 3 大）
+        *_board_slots(my),
+        *_board_slots(en),
         # 双方场上关键词
         float(sum(1 for m in my if m.has("剧毒"))),
         float(sum(1 for m in my if m.has("吸血"))),

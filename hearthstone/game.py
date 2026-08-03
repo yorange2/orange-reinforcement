@@ -227,6 +227,7 @@ class Observation:
     enemy_hand_size: int
     fatigue: int                    # 下次抽空牌堆会吃多少伤害的计数
     enemy_fatigue: int
+    going_first: bool               # 是否先手
     legal: List[Action]
 
     @property
@@ -355,6 +356,7 @@ class Game:
             enemy_hand_size=len(self.hands[enemy]),
             fatigue=self.fatigue[player],
             enemy_fatigue=self.fatigue[enemy],
+            going_first=(player == self.first),
             legal=self.legal_actions(player),
         )
 
