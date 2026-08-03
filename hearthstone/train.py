@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import random
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -21,13 +21,14 @@ import torch.nn.functional as F
 from .arena import evaluate_all, final_reward, format_table
 from .bots import make_bot
 from .game import play_game
+from .features import ORACLE_DIM
 from .policy import (
     NORMS,
     PolicyAgent,
     Step,
     UnifiedNet,
-    discounted_returns,
     evaluate_batch,
+    gae_advantages,
     make_batch,
     save_agent,
 )
@@ -47,16 +48,18 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     device = torch.device(args.device)
 
     net = UnifiedNet(hidden=args.hidden, layers=args.layers, norm=args.norm,
-                     residual=args.residual).to(device)
+                     residual=args.residual,
+                     oracle_dim=ORACLE_DIM if args.oracle else 0).to(device)
     if not args.quiet:
         res_str = " + 残差" if args.residual else ""
-        print(f"UnifiedNet: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}{res_str}，"
-              f"共 {net.n_params:,} 个参数")
+        oracle_str = f" + 先知价值头({ORACLE_DIM}维)" if args.oracle else ""
+        print(f"UnifiedNet: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}"
+              f"{res_str}{oracle_str}，共 {net.n_params:,} 个参数")
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     agent = PolicyAgent(net, device=device, training=True, seed=args.seed)
 
     batch_steps: List[Step] = []
-    batch_returns: List[np.ndarray] = []
+    batch_episodes: List[Tuple[int, float]] = []     # 每局的 (步数, 终局奖励)
 
     recent_wins: List[int] = []
     started = time.time()
@@ -76,11 +79,11 @@ def train(args: argparse.Namespace) -> PolicyAgent:
         steps = agent.trajectory.steps
         if steps:
             batch_steps.extend(steps)
-            batch_returns.append(discounted_returns(reward, len(steps), args.gamma))
+            batch_episodes.append((len(steps), reward))
 
         if episode % args.batch == 0 and batch_steps:
-            _update(optimizer, net, batch_steps, batch_returns, args, device)
-            batch_steps, batch_returns = [], []
+            _update(optimizer, net, batch_steps, batch_episodes, args, device)
+            batch_steps, batch_episodes = [], []
 
         if not args.quiet and episode % args.log_every == 0:
             window = recent_wins[-args.log_every:]
@@ -99,13 +102,29 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     return agent
 
 
-def _update(optimizer, net, steps, returns, args, device) -> None:
+def _update(optimizer, net, steps, episodes, args, device) -> None:
     batch = make_batch(steps, device)
-    target = torch.from_numpy(np.concatenate(returns)).to(device)
 
     with torch.no_grad():
         _, _, old_values = evaluate_batch(net, batch)
-    advantage = target - old_values
+
+    # GAE 必须按局分别倒序递推，不能跨局——所以这里按 episodes 里的步数切开。
+    # 优势只用旧策略的价值算一次，PPO 的多轮更新复用同一份，这是标准做法。
+    values_np = old_values.cpu().numpy()
+    advs: List[np.ndarray] = []
+    targets: List[np.ndarray] = []
+    offset = 0
+    for n_steps, reward in episodes:
+        adv, tgt = gae_advantages(
+            values_np[offset:offset + n_steps], reward, args.gamma, args.gae_lambda
+        )
+        advs.append(adv)
+        targets.append(tgt)
+        offset += n_steps
+    assert offset == len(values_np), f"步数对不上：{offset} != {len(values_np)}"
+
+    advantage = torch.from_numpy(np.concatenate(advs)).to(device)
+    target = torch.from_numpy(np.concatenate(targets)).to(device)
     if advantage.numel() > 1:
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
@@ -143,11 +162,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         choices=["random", "greedy", "rule", "mix"], help="训练对手")
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
+    parser.add_argument("--gae-lambda", type=float, default=0.5,
+                        help="GAE 的 λ，在偏差和方差之间插值。1.0 是蒙特卡洛回报，"
+                             "0 是单步 TD 残差。默认 0.5——在这个环境里实测最优，"
+                             "比社区惯例的 0.95 低很多，原因见 README")
     parser.add_argument("--hidden", type=int, default=128, help="打分网络隐藏层宽度")
     parser.add_argument("--layers", type=int, default=2, help="打分网络隐藏层数量")
     parser.add_argument("--norm", default="layer", choices=list(NORMS),
                         help="归一化方式（默认 layer）")
     parser.add_argument("--residual", action="store_true", help="隐藏层之间加残差连接")
+    parser.add_argument("--oracle", action="store_true",
+                        help="非对称 actor-critic：价值头额外看到对手手牌（只影响训练，"
+                             "推理时价值头不参与决策）")
     parser.add_argument("--batch", type=int, default=8, help="多少局更新一次")
     parser.add_argument("--entropy-coef", type=float, default=0.01, help="熵奖励系数")
     parser.add_argument("--value-coef", type=float, default=0.5, help="价值损失系数")

@@ -11,6 +11,9 @@ v3：从 81 维升到 129 维（+48 维局面特征），打破纯聚合编码�
 6. 逐手牌编码（可出牌中前 3 低费的费/攻/血/冲锋/突袭）
 7. 法术感知（手牌中是否有直伤/AOE/硬解）
 8. 先后手改为 Observation 显式字段，不再用牌堆差推断
+
+先知特征（oracle）：另一套**只给价值头**的特征，编码对手的真实手牌。它不进
+`state_features`，所以策略永远看不到，推理时也不计算——见 `oracle_features`。
 """
 
 from __future__ import annotations
@@ -54,6 +57,17 @@ STATE_DIM = S_BASE + S_WEAPON + S_HAND + S_BOARD + S_BOARD_SLOTS + S_HAND_CARDS 
 STATE_OFFSET = ACTION_DIM
 FEATURE_DIM = ACTION_DIM + STATE_DIM
 
+# ---------------------------------------------------------------- 先知维度布局
+
+O_AGG = 6                       # 对手手牌聚合：总攻/总血/可出数/可出攻/可出血/均费
+O_FLAGS = 3                     # 对手下回合能出的牌里有冲锋/嘲讽/突袭
+O_CARDS = 3 * 5                 # 对手手牌逐卡（前 3 低费可出）：费/攻/血/冲锋/突袭
+O_SPELLS = 3                    # 对手手牌法术感知：直伤/AOE/硬解
+O_BURST = 2                     # 对手手牌爆发：伤害总量 + 是否够斩杀我
+O_BIAS = 1
+
+ORACLE_DIM = O_AGG + O_FLAGS + O_CARDS + O_SPELLS + O_BURST + O_BIAS
+
 
 # ---------------------------------------------------------------- 对外接口
 
@@ -78,6 +92,62 @@ def state_features(obs: Observation) -> List[float]:
     feats = _state_features(obs)
     assert len(feats) == STATE_DIM, f"{len(feats)} != {STATE_DIM}"
     return feats
+
+
+def oracle_features(obs: Observation) -> np.ndarray:
+    """先知特征：把**对手的真实手牌**编码成定长向量。
+
+    只给非对称 actor-critic 的价值头用。价值头不参与线上决策，所以这里的作弊
+    不会泄漏到实际打法——详见 `Observation.enemy_hand` 的说明。
+
+    对手下回合的水晶用 `min(自己上限 + 1, 10)` 估计：双方水晶上限最多差 1，
+    这个近似足够判断"他下回合能拍下什么"。
+    """
+    hand = obs.enemy_hand
+    if not hand:
+        return np.zeros(ORACLE_DIM, dtype=np.float32)
+
+    mana = min(obs.max_mana + 1, 10)
+    playable = [c for c in hand if c.cost <= mana]
+
+    # 爆发：能直接打脸的法术伤害 + 冲锋随从的攻击力
+    burst = 0
+    for c in playable:
+        if c.spell:
+            burst += c.spell_damage + c.spell_missiles
+        elif c.has("冲锋"):
+            burst += c.attack
+
+    sorted_playable = sorted(playable, key=lambda c: (c.cost, -(c.attack + c.health)))
+    cards: List[float] = []
+    for i in range(3):
+        cards.extend(_hand_card_feature(sorted_playable[i]) if i < len(sorted_playable)
+                     else [0.0] * 5)
+
+    feats = [
+        # 聚合
+        sum(c.attack for c in hand) / 20.0,
+        sum(c.health for c in hand) / 30.0,
+        len(playable) / 6.0,
+        sum(c.attack for c in playable) / 20.0,
+        sum(c.health for c in playable) / 30.0,
+        (sum(c.cost for c in hand) / len(hand)) / 10.0,
+        # 下回合能拍出来的关键词
+        1.0 if any(c.has("冲锋") for c in playable) else 0.0,
+        1.0 if any(c.has("嘲讽") for c in playable) else 0.0,
+        1.0 if any(c.has("突袭") for c in playable) else 0.0,
+        # 逐卡
+        *cards,
+        # 法术感知
+        *_spell_flags(playable),
+        # 爆发
+        burst / 30.0,
+        1.0 if burst >= obs.hero_health else 0.0,
+        # bias
+        1.0,
+    ]
+    assert len(feats) == ORACLE_DIM, f"{len(feats)} != {ORACLE_DIM}"
+    return np.asarray(feats, dtype=np.float32)
 
 
 # ---------------------------------------------------------------- 动作
@@ -334,8 +404,11 @@ def _hand_cards(obs: Observation, n: int = 3) -> List[float]:
 
 def _spell_awareness(obs: Observation) -> List[float]:
     """可出牌中是否有直伤/AOE/硬解法术。"""
-    playable = obs.playable()
-    cards = [obs.hand[a.source] for a in playable]
+    return _spell_flags([obs.hand[a.source] for a in obs.playable()])
+
+
+def _spell_flags(cards: List) -> List[float]:
+    """给定一组牌，返回是否含直伤/AOE/硬解法术。局面特征和先知特征共用。"""
     has_damage = any(c.spell_damage > 0 or c.spell_missiles > 0 for c in cards)
     has_aoe = any(
         c.spell_aoe_enemy_minions > 0 or c.spell_aoe_all_enemies > 0

@@ -11,7 +11,7 @@
 | 游戏 | 说明 | 战绩 |
 | --- | --- | --- |
 | [**跑得快**](paodekuai/) | 三人 16 张变体。PPO 训练的策略网络，对手是手写的启发式算法 | 夹在两个 `rule` 机器人中间拿 **53.7%**（随机基准 33.3%，`rule` 自己只有 34.9%） |
-| [**简化版炉石**](hearthstone/) | 双人，卡池只有白板随从。引擎和规则对手已经就绪，模型还没开始训 | `rule` 打 `greedy` **83.0%**（随机基准 50%） |
+| [**简化版炉石**](hearthstone/) | 双人，60 张卡池（白板随从 + 法术 + 武器）。PPO + GAE 训练，推理时再叠一层整回合搜索 | 打 `rule` **80.2%**（随机基准 50%，`rule` 自己 50.6%） |
 
 ## 环境
 
@@ -35,7 +35,8 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python -m hearthstone.play                   # 跟规则机器人打一局
-.venv/bin/python -m hearthstone.arena --games 800      # 规则对手的胜率矩阵
+.venv/bin/python -m hearthstone.train                  # 训练（默认 2000 局，约 13 秒）
+.venv/bin/python -m hearthstone.bench --model hearthstone/models/agent.pt --search
 .venv/bin/python -m unittest discover -s hearthstone/tests -t .
 ```
 

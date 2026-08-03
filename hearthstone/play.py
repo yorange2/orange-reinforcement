@@ -218,6 +218,12 @@ def run(opponent: str, seed: Optional[int], first: int, watch: bool) -> None:
         players = [Human(), make_bot(opponent, seed=seed)]
         names = ["你", f"对手({opponent})"]
 
+    # 这里是独立于 play_game 的一份循环，同样要给搜索型选手绑定真实局面
+    for seat, player in enumerate(players):
+        bind = getattr(player, "bind_game", None)
+        if bind is not None:
+            bind(game, seat)
+
     print(f"简化版炉石：{names[0]} vs {names[1]}，玩家{first} 先手。")
 
     last_turn = -1
