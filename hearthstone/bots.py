@@ -26,6 +26,7 @@ from .cards import (
 from .game import (
     END_TURN,
     HERO,
+    HERO_SOURCE,
     Action,
     Minion,
     Observation,
@@ -165,20 +166,38 @@ class RuleBot(Bot):
         return best_action if best_score > threshold else None
 
     def _attack_score(self, obs: Observation, action: Action, ahead: bool) -> float:
+        if action.source == HERO_SOURCE:
+            return self._hero_attack_score(obs, action, ahead)
+
         attacker = obs.board[action.source]
 
         if action.target == HERO:
             dmg = attacker.attack * attacker.attacks_left
-            # 场面领先时打脸权重更高
             weight = 0.9 if ahead else 0.6
             urgency = 1.0 + max(0.0, 10 - obs.enemy_hero_health) / 10.0
-            # 残血随从打脸：反正快死了，不打白不打
             if attacker.health <= 1:
                 urgency += 0.5
             return dmg * weight * urgency
 
         defender = obs.enemy_board[action.target]
         return self._trade_value(attacker, defender)
+
+    def _hero_attack_score(self, obs: Observation, action: Action, ahead: bool) -> float:
+        weapon_atk = obs.hero_weapon_attack
+        if action.target == HERO:
+            weight = 0.9 if ahead else 0.6
+            urgency = 1.0 + max(0.0, 10 - obs.enemy_hero_health) / 10.0
+            return weapon_atk * weight * urgency
+
+        defender = obs.enemy_board[action.target]
+        # 英雄攻击随从：获得对方价值，损失自己的生命（反伤）
+        kills_def = weapon_atk >= _effective_hp(defender)
+        gain = _body_value(defender) if kills_def else 0.0
+        loss = defender.attack * 0.5  # 掉血比掉随从便宜
+        score = gain - loss
+        if kills_def:
+            score += 1.0  # 白嫖加分
+        return score
 
     # ------------------------------------------------------------------ 交易估价
 
@@ -229,6 +248,8 @@ class RuleBot(Bot):
         attacks = obs.attacks()
         best_score, best_action = -999.0, None
         for action in attacks:
+            if action.source == HERO_SOURCE:
+                continue  # 英雄不会残血
             att = obs.board[action.source]
             if att.health > 1:
                 continue

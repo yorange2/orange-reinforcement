@@ -59,6 +59,9 @@ COIN_MANA = 1
 #: 打脸时 Action.target 用这个值。
 HERO = -1
 
+#: 英雄拿武器攻击时 Action.source 用这个值。
+HERO_SOURCE = -2
+
 N_PLAYERS = 2
 
 # 动作类型
@@ -93,6 +96,10 @@ def play(hand_index: int) -> Action:
 
 def attack(attacker: int, target: int) -> Action:
     return Action(ATTACK, attacker, target)
+
+
+def hero_attack(target: int) -> Action:
+    return Action(ATTACK, HERO_SOURCE, target)
 
 
 END_TURN = Action(END)
@@ -210,6 +217,11 @@ class Observation:
     enemy_board: List[Minion]       # 对方场上，顺序与 Action.target 对应
     hero_health: int
     enemy_hero_health: int
+    hero_weapon_attack: int         # 0 = 没有武器
+    hero_weapon_durability: int
+    hero_attacked: bool             # 这回合英雄是否已攻击
+    enemy_weapon_attack: int
+    enemy_weapon_durability: int
     deck_size: int
     enemy_deck_size: int
     enemy_hand_size: int
@@ -226,6 +238,10 @@ class Observation:
 
     def attacks(self) -> List[Action]:
         return [a for a in self.legal if a.kind == ATTACK]
+
+    @property
+    def has_weapon(self) -> bool:
+        return self.hero_weapon_attack > 0
 
     def enemy_taunts(self) -> List[int]:
         """挡在前面的嘲讽随从的下标。"""
@@ -295,6 +311,9 @@ class Game:
         self.max_mana: List[int] = [0, 0]
         self.fatigue: List[int] = [0, 0]
         self.burned: List[List[CardDef]] = [[], []]
+        self.weapons: List[Optional[CardDef]] = [None, None]
+        self.weapon_durability: List[int] = [0, 0]
+        self.hero_attacked: List[bool] = [False, False]
         self.turns = 0
         self.finished = False
         self.winner: Optional[int] = None
@@ -314,6 +333,8 @@ class Game:
     def observe(self, player: Optional[int] = None) -> Observation:
         player = self.current if player is None else player
         enemy = 1 - player
+        my_weapon = self.weapons[player]
+        en_weapon = self.weapons[enemy]
         return Observation(
             player=player,
             turn=self.turns,
@@ -324,6 +345,11 @@ class Game:
             enemy_board=list(self.boards[enemy]),
             hero_health=self.hero_health[player],
             enemy_hero_health=self.hero_health[enemy],
+            hero_weapon_attack=my_weapon.attack if my_weapon else 0,
+            hero_weapon_durability=self.weapon_durability[player],
+            hero_attacked=self.hero_attacked[player],
+            enemy_weapon_attack=en_weapon.attack if en_weapon else 0,
+            enemy_weapon_durability=self.weapon_durability[enemy],
             deck_size=len(self.decks[player]),
             enemy_deck_size=len(self.decks[enemy]),
             enemy_hand_size=len(self.hands[enemy]),
@@ -364,6 +390,14 @@ class Game:
             for j in targets:
                 moves.append(attack(i, j))
 
+        # 英雄武器攻击：一回合最多一次
+        weapon = self.weapons[player]
+        if weapon is not None and weapon.attack > 0 and not self.hero_attacked[player]:
+            if face_open:
+                moves.append(hero_attack(HERO))
+            for j in targets:
+                moves.append(hero_attack(j))
+
         moves.append(END_TURN)
         return moves
 
@@ -391,13 +425,18 @@ class Game:
         card = hand[hand_index]
         if card.cost > self.mana[player]:
             raise ValueError(f"法力不够：{card} 要 {card.cost}，只剩 {self.mana[player]}")
-        if not card.spell and len(self.boards[player]) >= BOARD_LIMIT:
+        if card.weapon:
+            pass  # 武器不占随从位
+        elif not card.spell and len(self.boards[player]) >= BOARD_LIMIT:
             raise ValueError(f"场上已经有 {BOARD_LIMIT} 个随从了")
 
         hand.pop(hand_index)
         self.mana[player] -= card.cost
         if card.spell:
             self._cast(player, card)
+        elif card.weapon:
+            self.weapons[player] = card
+            self.weapon_durability[player] = card.durability
         else:
             self.boards[player].append(Minion.summon(card, self._take_uid()))
 
@@ -409,6 +448,11 @@ class Game:
 
     def _attack(self, attacker_index: int, target_index: int) -> None:
         player = self.current
+
+        if attacker_index == HERO_SOURCE:
+            self._hero_weapon_attack(player, target_index)
+            return
+
         board = self.boards[player]
         enemy_board = self.boards[1 - player]
 
@@ -456,6 +500,42 @@ class Game:
 
         self._check_over()
 
+    def _hero_weapon_attack(self, player: int, target_index: int) -> None:
+        """英雄用武器攻击。"""
+        weapon = self.weapons[player]
+        if weapon is None:
+            raise ValueError("没有装备武器")
+        if self.hero_attacked[player]:
+            raise ValueError("英雄这回合已经攻击过了")
+
+        enemy_board = self.boards[1 - player]
+        if target_index == HERO:
+            if any(m.taunting for m in enemy_board):
+                raise ValueError("对面有嘲讽随从挡着")
+            self._damage_hero(1 - player, weapon.attack)
+        else:
+            if not 0 <= target_index < len(enemy_board):
+                raise ValueError(f"对方场上没有第 {target_index} 个随从")
+            defender = enemy_board[target_index]
+            if defender.stealth:
+                raise ValueError(f"{defender.name} 处于潜行状态，不能被攻击")
+            if not defender.taunting and any(m.taunting for m in enemy_board):
+                raise ValueError("对面有嘲讽随从挡着")
+            # 英雄受到对方随从的反伤
+            self._damage_hero(player, defender.attack)
+            # 武器伤害打过去
+            dealt = self._hit(defender, weapon.attack)
+            if dealt and weapon.has("剧毒"):
+                defender.health = 0
+            self._drain(player, weapon, dealt)
+            self._clear_dead()
+
+        self.weapon_durability[player] -= 1
+        if self.weapon_durability[player] <= 0:
+            self.weapons[player] = None
+        self.hero_attacked[player] = True
+        self._check_over()
+
     def _end_turn(self) -> None:
         self.turns += 1
         if self.turns >= self.max_turns:        # 兜底，正常打不到
@@ -468,6 +548,7 @@ class Game:
         player = self.current
         self.max_mana[player] = min(self.max_mana[player] + 1, MAX_MANA)
         self.mana[player] = self.max_mana[player]
+        self.hero_attacked[player] = False
         for minion in self.boards[player]:
             minion.just_played = False          # 召唤失调解除
             minion.attacks_left = Minion.max_attacks(minion.card)
@@ -494,7 +575,7 @@ class Game:
         minion.health -= amount
         return amount
 
-    def _drain(self, player: int, source: Minion, dealt: int) -> None:
+    def _drain(self, player: int, source, dealt: int) -> None:
         """吸血：造成多少伤害，自己的英雄回多少血，不超过上限。"""
         if dealt <= 0 or not source.has(LIFESTEAL):
             return
@@ -608,6 +689,12 @@ def describe(obs: Observation, action: Action) -> str:
     if action.kind == PLAY:
         card = obs.hand[action.source]
         return f"{'用' if card.spell else '出'} {card}"
+    if action.source == HERO_SOURCE:
+        weapon_atk = obs.hero_weapon_attack
+        if action.target == HERO:
+            return f"英雄({weapon_atk}) 打脸"
+        defender = obs.enemy_board[action.target]
+        return f"英雄({weapon_atk}) 攻击 {defender.name}({defender.attack}/{defender.health})"
     attacker = obs.board[action.source]
     if action.target == HERO:
         return f"{attacker.name}({attacker.attack}) 打脸"
