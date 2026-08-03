@@ -378,16 +378,16 @@ class Game:
                     continue  # 随从需要场地
                 seen.add(card.name)
                 moves.append(play(i))
-            # 伤害法术：需要指定目标（敌方随从 + 英雄），不受嘲讽限制
-            elif card.spell_damage > 0:
+            # 伤害法术 / 变形术 / 横扫：需要指定目标（敌方随从 + 英雄），无视嘲讽和潜行
+            elif card.spell_damage > 0 or card.spell_transform:
                 if card.name in seen:
                     continue
                 seen.add(card.name)
                 for j in range(len(enemy_board)):
                     moves.append(Action(PLAY, i, j))
                 moves.append(Action(PLAY, i, HERO))
-            # 抽牌 / 飞弹：无需指定目标
-            elif card.spell_draw > 0 or card.spell_missiles > 0:
+            # 抽牌 / 飞弹 / AoE / 乱斗 / 扭曲虚空：无需指定目标
+            elif card.spell_draw > 0 or card.spell_missiles > 0 or card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0 or card.spell_destroy_all or card.spell_brawl:
                 if card.name in seen:
                     continue
                 seen.add(card.name)
@@ -472,8 +472,41 @@ class Game:
         if card.spell_draw > 0:
             for _ in range(card.spell_draw):
                 self._draw(player)
-            self._check_over()
-            return
+        if card.spell_destroy_all:
+            self.boards[0] = []
+            self.boards[1] = []
+        if card.spell_brawl:
+            all_minions = [(p, j, m) for p in range(N_PLAYERS)
+                           for j, m in enumerate(self.boards[p])]
+            if all_minions:
+                survivor = self.rng.choice(all_minions)
+                for p in range(N_PLAYERS):
+                    self.boards[p] = [m for m in self.boards[p] if m.uid == survivor[2].uid]
+        if card.spell_transform:
+            enemy_board = self.boards[1 - player]
+            if 0 <= target < len(enemy_board):
+                sheep = CardDef("绵羊", 1, 1, 1)
+                transformed = Minion.summon(sheep, self._take_uid())
+                transformed.just_played = enemy_board[target].just_played
+                transformed.attacks_left = enemy_board[target].attacks_left
+                enemy_board[target] = transformed
+        if card.spell_aoe_enemy_minions > 0:
+            dmg = card.spell_aoe_enemy_minions
+            for m in self.boards[1 - player]:
+                self._hit(m, dmg)
+        if card.spell_aoe_all_enemies > 0:
+            dmg = card.spell_aoe_all_enemies
+            for m in self.boards[1 - player]:
+                self._hit(m, dmg)
+            if dmg > 0:
+                self._damage_hero(1 - player, dmg)
+        if card.spell_aoe_all > 0:
+            dmg = card.spell_aoe_all
+            for p in range(N_PLAYERS):
+                for m in self.boards[p]:
+                    self._hit(m, dmg)
+            self._damage_hero(0, dmg)
+            self._damage_hero(1, dmg)
         if card.spell_damage > 0:
             if target == HERO:
                 self._damage_hero(1 - player, card.spell_damage)
@@ -482,16 +515,19 @@ class Game:
                 if not 0 <= target < len(enemy_board):
                     raise ValueError(f"对方场上没有第 {target} 个随从")
                 self._hit(enemy_board[target], card.spell_damage)
-            self._clear_dead()
-            self._check_over()
-            return
+        if card.spell_splash > 0:
+            for j, m in enumerate(self.boards[1 - player]):
+                if j != target:
+                    self._hit(m, card.spell_splash)
+            if target != HERO:
+                self._damage_hero(1 - player, card.spell_splash)
         if card.spell_missiles > 0:
             for _ in range(card.spell_missiles):
                 candidates: List[int] = []
-                if self.hero_health[1 - player] > 0:
-                    candidates.append(HERO)
                 for j in range(len(self.boards[1 - player])):
                     candidates.append(j)
+                if self.hero_health[1 - player] > 0:
+                    candidates.append(HERO)
                 if not candidates:
                     break
                 t = self.rng.choice(candidates)
@@ -499,10 +535,8 @@ class Game:
                     self._damage_hero(1 - player, 1)
                 else:
                     self._hit(self.boards[1 - player][t], 1)
-            self._clear_dead()
-            self._check_over()
-            return
-        raise ValueError(f"不认识的法术 {card.name}")
+        self._clear_dead()
+        self._check_over()
 
     def _attack(self, attacker_index: int, target_index: int) -> None:
         player = self.current
@@ -746,7 +780,7 @@ def describe(obs: Observation, action: Action) -> str:
         return "结束回合"
     if action.kind == PLAY:
         card = obs.hand[action.source]
-        if card.spell and card.spell_damage > 0:
+        if card.spell and (card.spell_damage > 0 or card.spell_transform):
             who = "英雄" if action.target == HERO else f"随从#{action.target}"
             return f"{card.name} → {who}"
         return f"{'用' if card.spell else '出'} {card}"

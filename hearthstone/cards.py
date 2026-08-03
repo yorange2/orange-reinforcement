@@ -56,18 +56,32 @@ class CardDef(NamedTuple):
     `spell_damage` > 0: 对单个目标造成伤害（需指定目标）
     `spell_draw` > 0: 抽 N 张牌
     `spell_missiles` > 0: 随机对敌方目标造成 N 次 1 点伤害
+    `spell_aoe_enemy_minions` > 0: 对敌方所有随从造成伤害
+    `spell_aoe_all_enemies` > 0: 对敌方随从+英雄造成伤害
+    `spell_aoe_all` > 0: 对所有角色造成伤害（含自己和自己的随从）
+    `spell_splash` > 0: 配合 spell_damage，对目标以外的敌方造成伤害（横扫）
+    `spell_transform`: 变形术——把目标变成 1/1
+    `spell_destroy_all`: 消灭所有随从
+    `spell_brawl`: 绝命乱斗——随机留一个
     """
 
     name: str
     cost: int
     attack: int = 0
-    health: int = 0          # 随从是血量，武器是耐久度
+    health: int = 0
     keywords: Tuple[str, ...] = ()
     spell: bool = False
     weapon: bool = False
     spell_damage: int = 0
     spell_draw: int = 0
     spell_missiles: int = 0
+    spell_aoe_enemy_minions: int = 0
+    spell_aoe_all_enemies: int = 0
+    spell_aoe_all: int = 0
+    spell_splash: int = 0
+    spell_transform: bool = False
+    spell_destroy_all: bool = False
+    spell_brawl: bool = False
 
     @property
     def stats(self) -> int:
@@ -120,13 +134,49 @@ def _smissiles(name: str, cost: int, missiles: int) -> CardDef:
     return CardDef(name, cost, spell=True, spell_missiles=missiles)
 
 
+def _saoe_minions(name: str, cost: int, damage: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_aoe_enemy_minions=damage)
+
+
+def _saoe_enemies(name: str, cost: int, damage: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_aoe_all_enemies=damage)
+
+
+def _saoe_all(name: str, cost: int, damage: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_aoe_all=damage)
+
+
+def _sswipe(name: str, cost: int, target_dmg: int, splash: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_damage=target_dmg, spell_splash=splash)
+
+
+def _stransform(name: str, cost: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_transform=True)
+
+
+def _sdestroy(name: str, cost: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_destroy_all=True)
+
+
+def _sbrawl(name: str, cost: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_brawl=True)
+
+
 #: 卡池，按费用排序。索引即卡牌 id，编码特征时可以直接用。
 POOL: List[CardDef] = [
-    # ---- 法术：抽牌和直伤
+    # ---- 法术
     _smissiles("奥术飞弹", 1, 3),
-    _sd("火球术", 4, 6),
+    CardDef("刀扇", 3, spell=True, spell_aoe_enemy_minions=1, spell_draw=1),
     _sdraw("奥术智慧", 3, 2),
+    _sd("火球术", 4, 6),
+    _stransform("变形术", 4),
+    _saoe_enemies("奉献", 4, 2),
+    _saoe_all("地狱烈焰", 4, 3),
+    _sswipe("横扫", 4, 4, 1),
+    _sbrawl("绝命乱斗", 5),
+    _saoe_minions("烈焰风暴", 7, 4),
     _sdraw("疾跑", 7, 4),
+    _sdestroy("扭曲虚空", 8),
     # ---- 武器：纯白板，只有攻/耐久
     _w("圣光的正义", 1, 1, 4),
     _w("炽炎战斧", 2, 3, 2),
