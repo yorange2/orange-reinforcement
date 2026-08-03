@@ -85,6 +85,21 @@ def _play(obs: Observation, action: Action) -> List[float]:
     card = obs.hand[action.source]
     kw = _kw_vec(card.keywords)
     left = obs.mana - card.cost
+    target_is_hero = action.target == HERO
+    target_is_minion = not target_is_hero and card.spell_damage > 0
+
+    if target_is_minion and action.target < len(obs.enemy_board):
+        defender = obs.enemy_board[action.target]
+        def_atk, def_hp = defender.attack / 10.0, defender.health / 10.0
+        def_taunt = 1.0 if defender.taunting else 0.0
+        def_shield = 1.0 if defender.divine_shield else 0.0
+        def_poison = 1.0 if defender.has("剧毒") else 0.0
+        kills_def = 1.0 if card.spell_damage >= (defender.health + (1 if defender.divine_shield else 0)) else 0.0
+    else:
+        def_atk, def_hp = 0.0, 0.0
+        def_taunt, def_shield, def_poison = 0.0, 0.0, 0.0
+        kills_def = 0.0
+
     feats = [
         # 类型
         1.0, 0.0, 0.0,
@@ -93,12 +108,17 @@ def _play(obs: Observation, action: Action) -> List[float]:
         card.attack / 10.0,
         card.health / 10.0,
         *kw,
-        # 攻击者（不出牌，全是 0）
+        # 攻击者（法术不需要）
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        # 目标
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        # 目标（伤害法术直接写目标信息，其他置零）
+        1.0 if target_is_hero else 0.0,
+        def_atk,
+        def_hp,
+        def_taunt,
+        def_shield,
+        def_poison,
         # 交易结果
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        kills_def, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         # 出牌效果
         left / 10.0,
         1.0 if card.cost == obs.mana and card.cost > 0 else 0.0,

@@ -363,16 +363,41 @@ class Game:
         player = self.current if player is None else player
         moves: List[Action] = []
 
-        # 出牌：付得起；随从还要求场上有位置。手里两张一样的卡是同一个动作，只留一个。
+        # 出牌：付得起；手里同名卡只留一个（伤害法术除外，每目标各一个动作）
         board_full = len(self.boards[player]) >= BOARD_LIMIT
         seen = set()
+        enemy_board = self.boards[1 - player]
         for i, card in enumerate(self.hands[player]):
-            if card.cost > self.mana[player] or card.name in seen:
+            if card.cost > self.mana[player]:
                 continue
-            if board_full and not card.spell:
-                continue
-            seen.add(card.name)
-            moves.append(play(i))
+            # 随从和武器
+            if not card.spell:
+                if card.name in seen:
+                    continue
+                if not card.weapon and board_full:
+                    continue  # 随从需要场地
+                seen.add(card.name)
+                moves.append(play(i))
+            # 伤害法术：需要指定目标（敌方随从 + 英雄），不受嘲讽限制
+            elif card.spell_damage > 0:
+                if card.name in seen:
+                    continue
+                seen.add(card.name)
+                for j in range(len(enemy_board)):
+                    moves.append(Action(PLAY, i, j))
+                moves.append(Action(PLAY, i, HERO))
+            # 抽牌 / 飞弹：无需指定目标
+            elif card.spell_draw > 0 or card.spell_missiles > 0:
+                if card.name in seen:
+                    continue
+                seen.add(card.name)
+                moves.append(play(i))
+            # 幸运币等
+            else:
+                if card.name in seen:
+                    continue
+                seen.add(card.name)
+                moves.append(play(i))
 
         # 攻击：潜行的随从不能被指定；有嘲讽挡着就只能打嘲讽
         enemy_board = self.boards[1 - player]
@@ -409,7 +434,7 @@ class Game:
             raise RuntimeError("这一局已经结束了")
 
         if action.kind == PLAY:
-            self._play_card(action.source)
+            self._play_card(action.source, action.target)
         elif action.kind == ATTACK:
             self._attack(action.source, action.target)
         elif action.kind == END:
@@ -417,7 +442,7 @@ class Game:
         else:
             raise ValueError(f"未知的动作类型 {action.kind!r}")
 
-    def _play_card(self, hand_index: int) -> None:
+    def _play_card(self, hand_index: int, target: int = HERO) -> None:
         player = self.current
         hand = self.hands[player]
         if not 0 <= hand_index < len(hand):
@@ -433,16 +458,49 @@ class Game:
         hand.pop(hand_index)
         self.mana[player] -= card.cost
         if card.spell:
-            self._cast(player, card)
+            self._cast(player, card, target)
         elif card.weapon:
             self.weapons[player] = card
             self.weapon_durability[player] = card.durability
         else:
             self.boards[player].append(Minion.summon(card, self._take_uid()))
 
-    def _cast(self, player: int, card: CardDef) -> None:
+    def _cast(self, player: int, card: CardDef, target: int = HERO) -> None:
         if card.name == THE_COIN.name:
             self.mana[player] += COIN_MANA
+            return
+        if card.spell_draw > 0:
+            for _ in range(card.spell_draw):
+                self._draw(player)
+            self._check_over()
+            return
+        if card.spell_damage > 0:
+            if target == HERO:
+                self._damage_hero(1 - player, card.spell_damage)
+            else:
+                enemy_board = self.boards[1 - player]
+                if not 0 <= target < len(enemy_board):
+                    raise ValueError(f"对方场上没有第 {target} 个随从")
+                self._hit(enemy_board[target], card.spell_damage)
+            self._clear_dead()
+            self._check_over()
+            return
+        if card.spell_missiles > 0:
+            for _ in range(card.spell_missiles):
+                candidates: List[int] = []
+                if self.hero_health[1 - player] > 0:
+                    candidates.append(HERO)
+                for j in range(len(self.boards[1 - player])):
+                    candidates.append(j)
+                if not candidates:
+                    break
+                t = self.rng.choice(candidates)
+                if t == HERO:
+                    self._damage_hero(1 - player, 1)
+                else:
+                    self._hit(self.boards[1 - player][t], 1)
+            self._clear_dead()
+            self._check_over()
             return
         raise ValueError(f"不认识的法术 {card.name}")
 
@@ -688,6 +746,9 @@ def describe(obs: Observation, action: Action) -> str:
         return "结束回合"
     if action.kind == PLAY:
         card = obs.hand[action.source]
+        if card.spell and card.spell_damage > 0:
+            who = "英雄" if action.target == HERO else f"随从#{action.target}"
+            return f"{card.name} → {who}"
         return f"{'用' if card.spell else '出'} {card}"
     if action.source == HERO_SOURCE:
         weapon_atk = obs.hero_weapon_attack

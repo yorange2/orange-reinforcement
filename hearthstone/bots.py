@@ -63,9 +63,15 @@ class GreedyBot(Bot):
     name = "greedy"
 
     def choose(self, obs: Observation) -> Action:
-        # 幸运币：手里有就立刻用，先手用不了这回合就先出别的
+        # 幸运币：手里有就立刻用
         for action in obs.playable():
             if obs.hand[action.source].name == THE_COIN.name:
+                return action
+
+        # 伤害法术：优先打脸
+        for action in obs.playable():
+            card = obs.hand[action.source]
+            if card.spell_damage > 0 and action.target == HERO:
                 return action
 
         # 攻击：优先级 打脸 > 打嘲讽
@@ -76,8 +82,19 @@ class GreedyBot(Bot):
         for action in obs.attacks():
             return action
 
-        # 出牌：贵 → 便宜，不亏曲线（白板随从的费用曲线是单调的）
-        plays = obs.playable()
+        # 伤害法术：打随从也行
+        for action in obs.playable():
+            if obs.hand[action.source].spell_damage > 0:
+                return action
+
+        # 抽牌 / 飞弹：有就用
+        for action in obs.playable():
+            card = obs.hand[action.source]
+            if card.spell_draw > 0 or card.spell_missiles > 0:
+                return action
+
+        # 出牌：贵 → 便宜
+        plays = [a for a in obs.playable() if not obs.hand[a.source].spell]
         if plays:
             return max(plays, key=lambda a: (
                 obs.hand[a.source].cost,
@@ -113,17 +130,22 @@ class RuleBot(Bot):
         if kill is not None:
             return kill
 
-        # 2. 最优单次攻击
+        # 2. 法术：伤害打最值的目标 / 抽牌有闲费就用
+        spell = self._best_spell(obs)
+        if spell is not None:
+            return spell
+
+        # 3. 最优单次攻击
         attack_act = self._best_attack(obs)
         if attack_act is not None:
             return attack_act
 
-        # 3. 残血自爆：1 血随从反正下回合会死，现在打出去
+        # 4. 残血自爆
         yolo = self._best_yolo(obs)
         if yolo is not None:
             return yolo
 
-        # 4. 出牌：用满水晶
+        # 5. 出牌：用满水晶
         play_act = self._best_play(obs)
         if play_act is not None:
             return play_act
@@ -261,10 +283,58 @@ class RuleBot(Bot):
                 best_score, best_action = score, action
         return best_action if best_score > 0.5 else None
 
+    # ------------------------------------------------------------------ 法术
+
+    def _best_spell(self, obs: Observation) -> Optional[Action]:
+        """伤害法术：优先杀高价值随从或斩杀；抽牌法术：有闲费就用。"""
+        best_score, best_action = -999.0, None
+        for action in obs.playable():
+            card = obs.hand[action.source]
+            if card.spell_damage > 0:
+                score = self._damage_spell_score(obs, action)
+                if score > best_score:
+                    best_score, best_action = score, action
+            elif card.spell_draw > 0:
+                # 抽牌：剩余水晶多时优先
+                if obs.mana >= card.cost + 2:  # 有闲费
+                    score = float(card.spell_draw)
+                    if score > best_score:
+                        best_score, best_action = score, action
+            elif card.spell_missiles > 0:
+                # 飞弹：对方场上有随从就放
+                if obs.enemy_board:
+                    score = 3.0
+                    if score > best_score:
+                        best_score, best_action = score, action
+
+        return best_action if best_score > 0 else None
+
+    def _damage_spell_score(self, obs: Observation, action: Action) -> float:
+        card = obs.hand[action.source]
+        dmg = card.spell_damage
+        if action.target == HERO:
+            # 打脸：伤害价值 + 斩杀权重
+            urgency = 1.0 + max(0.0, 10 - obs.enemy_hero_health) / 5.0
+            if dmg >= obs.enemy_hero_health:
+                return 100.0  # 直接赢
+            return dmg * 0.7 * urgency
+        # 打随从
+        defender = obs.enemy_board[action.target]
+        kills = dmg >= (defender.health + (1 if defender.divine_shield else 0))
+        if not kills:
+            return dmg * 0.3  # 打残价值不高
+        # 打死了：获得对方价值
+        score = _body_value(defender)
+        if defender.has("剧毒"):
+            score += 1.5
+        if defender.has("嘲讽"):
+            score += 1.0
+        return score
+
     # ------------------------------------------------------------------ 出牌
 
     def _best_play(self, obs: Observation) -> Optional[Action]:
-        plays = obs.playable()
+        plays = [a for a in obs.playable() if not obs.hand[a.source].spell]
         if not plays:
             return None
 

@@ -51,7 +51,12 @@ INERT_KEYWORDS: Tuple[str, ...] = (ELUSIVE, SPELL_DAMAGE)
 
 
 class CardDef(NamedTuple):
-    """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。"""
+    """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。
+
+    `spell_damage` > 0: 对单个目标造成伤害（需指定目标）
+    `spell_draw` > 0: 抽 N 张牌
+    `spell_missiles` > 0: 随机对敌方目标造成 N 次 1 点伤害
+    """
 
     name: str
     cost: int
@@ -60,6 +65,9 @@ class CardDef(NamedTuple):
     keywords: Tuple[str, ...] = ()
     spell: bool = False
     weapon: bool = False
+    spell_damage: int = 0
+    spell_draw: int = 0
+    spell_missiles: int = 0
 
     @property
     def stats(self) -> int:
@@ -100,8 +108,25 @@ def _w(name: str, cost: int, attack: int, durability: int) -> CardDef:
     return CardDef(name, cost, attack, durability, weapon=True)
 
 
+def _sd(name: str, cost: int, damage: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_damage=damage)
+
+
+def _sdraw(name: str, cost: int, draw: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_draw=draw)
+
+
+def _smissiles(name: str, cost: int, missiles: int) -> CardDef:
+    return CardDef(name, cost, spell=True, spell_missiles=missiles)
+
+
 #: 卡池，按费用排序。索引即卡牌 id，编码特征时可以直接用。
 POOL: List[CardDef] = [
+    # ---- 法术：抽牌和直伤
+    _smissiles("奥术飞弹", 1, 3),
+    _sd("火球术", 4, 6),
+    _sdraw("奥术智慧", 3, 2),
+    _sdraw("疾跑", 7, 4),
     # ---- 武器：纯白板，只有攻/耐久
     _w("圣光的正义", 1, 1, 4),
     _w("炽炎战斧", 2, 3, 2),
