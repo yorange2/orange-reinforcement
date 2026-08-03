@@ -82,15 +82,18 @@ class GreedyBot(Bot):
         for action in obs.attacks():
             return action
 
-        # 伤害法术：打随从也行
-        for action in obs.playable():
-            if obs.hand[action.source].spell_damage > 0:
-                return action
-
-        # 抽牌 / 飞弹：有就用
+        # 伤害/变形法术：打随从
         for action in obs.playable():
             card = obs.hand[action.source]
-            if card.spell_draw > 0 or card.spell_missiles > 0:
+            if (card.spell_damage > 0 or card.spell_transform) and action.target != HERO:
+                return action
+
+        # AoE / 清场 / 抽牌 / 飞弹：有就用
+        for action in obs.playable():
+            card = obs.hand[action.source]
+            if (card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0
+                    or card.spell_aoe_all > 0 or card.spell_destroy_all or card.spell_brawl
+                    or card.spell_draw > 0 or card.spell_missiles > 0):
                 return action
 
         # 出牌：贵 → 便宜
@@ -286,28 +289,62 @@ class RuleBot(Bot):
     # ------------------------------------------------------------------ 法术
 
     def _best_spell(self, obs: Observation) -> Optional[Action]:
-        """伤害法术：优先杀高价值随从或斩杀；抽牌法术：有闲费就用。"""
+        """伤害/变形/AoE/抽牌——每种法术有自己的决策逻辑。"""
         best_score, best_action = -999.0, None
         for action in obs.playable():
             card = obs.hand[action.source]
-            if card.spell_damage > 0:
+            score = -999.0
+            if card.spell_damage > 0 or card.spell_transform:
                 score = self._damage_spell_score(obs, action)
-                if score > best_score:
-                    best_score, best_action = score, action
+            elif card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0:
+                score = self._aoe_score(obs, card)
+            elif card.spell_destroy_all or card.spell_brawl:
+                score = self._board_clear_score(obs, card)
             elif card.spell_draw > 0:
-                # 抽牌：剩余水晶多时优先
-                if obs.mana >= card.cost + 2:  # 有闲费
+                if obs.mana >= card.cost + 2:
                     score = float(card.spell_draw)
-                    if score > best_score:
-                        best_score, best_action = score, action
             elif card.spell_missiles > 0:
-                # 飞弹：对方场上有随从就放
                 if obs.enemy_board:
                     score = 3.0
-                    if score > best_score:
-                        best_score, best_action = score, action
+            if score > best_score:
+                best_score, best_action = score, action
 
         return best_action if best_score > 0 else None
+
+    def _aoe_score(self, obs: Observation, card) -> float:
+        """AoE 价值：看能打到几个敌方随从，清掉多少体量。"""
+        dmg = card.spell_aoe_enemy_minions or card.spell_aoe_all_enemies or card.spell_aoe_all
+        en_board = obs.enemy_board
+        if not en_board:
+            return 0.0
+        value = 0.0
+        for m in en_board:
+            eff_hp = m.health + (1 if m.divine_shield else 0)
+            if dmg >= eff_hp:
+                value += _body_value(m)  # 打死
+            else:
+                value += dmg * 0.3  # 打残
+        # AoE 打到英雄也有价值
+        if card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0:
+            value += dmg * 0.5  # 打脸
+        # 打到自己的惩罚
+        if card.spell_aoe_all > 0:
+            for m in obs.board:
+                value -= min(dmg, m.health) * 0.3
+            value -= dmg * 0.5  # 打自己
+        return value
+
+    def _board_clear_score(self, obs: Observation, card) -> float:
+        """清场法术：场面落后时价值高。"""
+        en_board = obs.enemy_board
+        if not en_board:
+            return 0.0
+        en_power = sum(_body_value(m) for m in en_board)
+        my_power = sum(_body_value(m) for m in obs.board)
+        # 敌方场面远大于我方时才清
+        if en_power > my_power * 1.5:
+            return en_power - my_power  # 净收益
+        return 0.0
 
     def _damage_spell_score(self, obs: Observation, action: Action) -> float:
         card = obs.hand[action.source]

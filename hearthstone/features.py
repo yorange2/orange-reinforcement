@@ -86,7 +86,8 @@ def _play(obs: Observation, action: Action) -> List[float]:
     kw = _kw_vec(card.keywords)
     left = obs.mana - card.cost
     target_is_hero = action.target == HERO
-    target_is_minion = not target_is_hero and card.spell_damage > 0
+    is_targeted_spell = card.spell_damage > 0 or card.spell_transform
+    target_is_minion = not target_is_hero and is_targeted_spell
 
     if target_is_minion and action.target < len(obs.enemy_board):
         defender = obs.enemy_board[action.target]
@@ -94,7 +95,7 @@ def _play(obs: Observation, action: Action) -> List[float]:
         def_taunt = 1.0 if defender.taunting else 0.0
         def_shield = 1.0 if defender.divine_shield else 0.0
         def_poison = 1.0 if defender.has("剧毒") else 0.0
-        kills_def = 1.0 if card.spell_damage >= (defender.health + (1 if defender.divine_shield else 0)) else 0.0
+        kills_def = 1.0  # 伤害法术能打死就算，变形术无条件"消灭"
     else:
         def_atk, def_hp = 0.0, 0.0
         def_taunt, def_shield, def_poison = 0.0, 0.0, 0.0
