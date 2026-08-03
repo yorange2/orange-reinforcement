@@ -23,10 +23,9 @@ from .bots import make_bot
 from .game import play_game
 from .policy import (
     NORMS,
-    MoveScorer,
     PolicyAgent,
     Step,
-    ValueNet,
+    UnifiedNet,
     discounted_returns,
     evaluate_batch,
     make_batch,
@@ -47,18 +46,14 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     rng = random.Random(args.seed)
     device = torch.device(args.device)
 
-    scorer = MoveScorer(hidden=args.hidden, layers=args.layers, norm=args.norm,
-                        residual=args.residual).to(device)
+    net = UnifiedNet(hidden=args.hidden, layers=args.layers, norm=args.norm,
+                     residual=args.residual).to(device)
     if not args.quiet:
         res_str = " + 残差" if args.residual else ""
-        print(f"打分网络: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}{res_str}，"
-              f"共 {scorer.n_params:,} 个参数")
-    value = ValueNet(hidden=args.hidden // 2, layers=args.layers, norm=args.norm,
-                     residual=args.residual).to(device)
-    optimizer = torch.optim.Adam(
-        list(scorer.parameters()) + list(value.parameters()), lr=args.lr
-    )
-    agent = PolicyAgent(scorer, value, device=device, training=True, seed=args.seed)
+        print(f"UnifiedNet: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}{res_str}，"
+              f"共 {net.n_params:,} 个参数")
+    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
+    agent = PolicyAgent(net, device=device, training=True, seed=args.seed)
 
     batch_steps: List[Step] = []
     batch_returns: List[np.ndarray] = []
@@ -84,7 +79,7 @@ def train(args: argparse.Namespace) -> PolicyAgent:
             batch_returns.append(discounted_returns(reward, len(steps), args.gamma))
 
         if episode % args.batch == 0 and batch_steps:
-            _update(optimizer, scorer, value, batch_steps, batch_returns, args, device)
+            _update(optimizer, net, batch_steps, batch_returns, args, device)
             batch_steps, batch_returns = [], []
 
         if not args.quiet and episode % args.log_every == 0:
@@ -104,19 +99,19 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     return agent
 
 
-def _update(optimizer, scorer, value_net, steps, returns, args, device) -> None:
+def _update(optimizer, net, steps, returns, args, device) -> None:
     batch = make_batch(steps, device)
     target = torch.from_numpy(np.concatenate(returns)).to(device)
 
     with torch.no_grad():
-        _, _, old_values = evaluate_batch(scorer, value_net, batch)
+        _, _, old_values = evaluate_batch(net, batch)
     advantage = target - old_values
     if advantage.numel() > 1:
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
     epochs = args.ppo_epochs if args.algo == "ppo" else 1
     for _ in range(epochs):
-        log_prob, entropy, values = evaluate_batch(scorer, value_net, batch)
+        log_prob, entropy, values = evaluate_batch(net, batch)
 
         if args.algo == "ppo":
             ratio = torch.exp(log_prob - batch.old_log_probs)
@@ -130,9 +125,7 @@ def _update(optimizer, scorer, value_net, steps, returns, args, device) -> None:
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            [p for group in optimizer.param_groups for p in group["params"]], args.clip
-        )
+        torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip)
         optimizer.step()
 
 
@@ -190,7 +183,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  {a:<7} vs {b:<7} {stat}")
 
     if args.save:
-        save_agent(args.save, agent.scorer, agent.value, meta=vars(args))
+        save_agent(args.save, agent.net, meta=vars(args))
         print(f"\n权重已保存到 {args.save}")
 
     return 0

@@ -35,7 +35,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from .policy import load_agent
 
         agent = load_agent(path, device=args.device)
-        label = f"{path.split('/')[-1]}({agent.scorer.n_params / 1000:.0f}k)"
+        label = f"{path.split('/')[-1]}({agent.net.n_params / 1000:.0f}k)"
         contenders.append((label, agent))
     contenders.extend((name, make_bot(name, seed=args.seed)) for name in reversed(OPPONENTS))
 
