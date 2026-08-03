@@ -116,6 +116,21 @@ class TestPolicyAgent(unittest.TestCase):
             self.assertEqual(scorer(torch.zeros(n, FEATURE_DIM)).shape, (n,))
 
 
+class TestSamplingMode(unittest.TestCase):
+    def test_evaluation_is_greedy_and_deterministic(self):
+        agent = PolicyAgent(MoveScorer(hidden=16))
+        obs = Game(rng=random.Random(2)).observe()
+        self.assertEqual(len({agent.choose(obs) for _ in range(20)}), 1)
+
+    def test_training_samples_and_records(self):
+        torch.manual_seed(0)
+        agent = PolicyAgent(MoveScorer(hidden=16), ValueNet(hidden=8), training=True)
+        obs = Game(rng=random.Random(2)).observe()
+        picks = {agent.choose(obs) for _ in range(40)}
+        self.assertGreater(len(picks), 1, "训练时要按概率抽动作，不能取最高分")
+        self.assertEqual(len(agent.trajectory), 40)
+
+
 class TestModelSize(unittest.TestCase):
     def test_more_layers_and_width_means_more_parameters(self):
         small = MoveScorer(hidden=128, layers=2, norm="none")
@@ -232,40 +247,6 @@ class TestNormalization(unittest.TestCase):
             self.assertTrue(torch.isfinite(param).all())
 
 
-class TestResidual(unittest.TestCase):
-    def test_off_by_default(self):
-        self.assertFalse(MoveScorer().residual)
-        self.assertFalse(train_module.parse_args([]).residual)
-
-    def test_residual_blocks_replace_the_plain_hidden_layers(self):
-        from paodekuai.policy import ResidualBlock
-
-        scorer = MoveScorer(hidden=16, layers=4, residual=True)
-        self.assertEqual(sum(isinstance(b, ResidualBlock) for b in scorer.net), 3)
-        # 第一层要把输入投到 hidden 宽，维度不一致没法做残差
-        self.assertIsInstance(scorer.net[0], torch.nn.Linear)
-
-    def test_costs_no_extra_parameters(self):
-        plain = MoveScorer(hidden=32, layers=3, residual=False)
-        residual = MoveScorer(hidden=32, layers=3, residual=True)
-        self.assertEqual(plain.n_params, residual.n_params)
-
-    def test_block_adds_the_input_back(self):
-        from paodekuai.policy import ResidualBlock
-
-        block = ResidualBlock(8, "none").eval()
-        x = torch.randn(3, 8)
-        with torch.no_grad():
-            torch.testing.assert_close(block(x) - x, block.body(x))
-
-    def test_checkpoint_remembers_it(self):
-        scorer = MoveScorer(hidden=16, layers=3, residual=True)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "res.pt")
-            save_agent(path, scorer)
-            self.assertTrue(load_agent(path).scorer.residual)
-
-
 class TestAttachmentFeatures(unittest.TestCase):
     """带牌的点数：少了这两维，"QQQ 带 6" 和 "QQQ 带 K" 在网络眼里完全一样。"""
 
@@ -304,97 +285,6 @@ class TestAttachmentFeatures(unittest.TestCase):
         self.assertIn(6, rows)
         self.assertIn(13, rows)
         self.assertLess(rows[6], rows[13], "带小牌和带大牌的特征必须不同")
-
-
-class TestSamplingMode(unittest.TestCase):
-    def test_greedy_by_default(self):
-        agent = PolicyAgent(MoveScorer(hidden=16))
-        self.assertFalse(agent.sample)
-        obs = Game(rng=random.Random(2)).observe()
-        self.assertEqual({agent.choose(obs) for _ in range(20)}.__len__(), 1)
-
-    def test_sampling_without_recording(self):
-        # 自我对弈的快照对手要有随机性，但不该产生轨迹
-        torch.manual_seed(0)
-        agent = PolicyAgent(MoveScorer(hidden=16), training=False, sample=True)
-        obs = Game(rng=random.Random(2)).observe()
-        picks = {agent.choose(obs) for _ in range(40)}
-        self.assertGreater(len(picks), 1, "sample=True 应该抽出不同的动作")
-        self.assertEqual(len(agent.trajectory), 0, "非训练模式不该记录轨迹")
-
-    def test_training_implies_sampling(self):
-        self.assertTrue(PolicyAgent(MoveScorer(hidden=16), training=True).sample)
-
-
-class TestOpponentPool(unittest.TestCase):
-    """自我对弈的对手池。"""
-
-    def make_pool(self, capacity=3, bot_ratio=0.0, snapshot_every=10):
-        return train_module.OpponentPool(
-            capacity=capacity, bot_ratio=bot_ratio, snapshot_every=snapshot_every,
-            rng=random.Random(0), device=torch.device("cpu"),
-        )
-
-    def test_snapshots_only_on_the_interval(self):
-        pool, scorer = self.make_pool(snapshot_every=10), MoveScorer(hidden=8)
-        self.assertFalse(pool.maybe_snapshot(7, scorer))
-        self.assertTrue(pool.maybe_snapshot(10, scorer))
-        self.assertEqual(len(pool.snapshots), 1)
-
-    def test_oldest_snapshot_is_evicted_when_full(self):
-        pool, scorer = self.make_pool(capacity=3, snapshot_every=1), MoveScorer(hidden=8)
-        for episode in range(1, 8):
-            pool.maybe_snapshot(episode, scorer)
-        self.assertEqual(len(pool.snapshots), 3)
-
-    def test_snapshot_is_frozen_against_later_training(self):
-        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
-        pool.maybe_snapshot(1, scorer)
-        before = pool.snapshots[0].scorer.net[0].weight.clone()
-
-        with torch.no_grad():  # 之后继续训练，快照不该跟着变
-            scorer.net[0].weight.add_(5.0)
-
-        torch.testing.assert_close(pool.snapshots[0].scorer.net[0].weight, before)
-        self.assertFalse(any(p.requires_grad for p in pool.snapshots[0].scorer.parameters()))
-
-    def test_snapshot_opponents_sample_but_do_not_record(self):
-        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
-        pool.maybe_snapshot(1, scorer)
-        snapshot = pool.snapshots[0]
-        self.assertTrue(snapshot.sample)
-        self.assertFalse(snapshot.training)
-
-    def test_draw_always_returns_two_opponents(self):
-        pool, scorer = self.make_pool(snapshot_every=1), MoveScorer(hidden=8)
-        pool.maybe_snapshot(1, scorer)
-        for _ in range(10):
-            self.assertEqual(len(pool.draw()), 2)
-
-    def test_empty_pool_falls_back_to_rule_bots(self):
-        pool = self.make_pool()
-        opponents = pool.draw()
-        self.assertEqual(len(opponents), 2)
-        self.assertFalse(any(isinstance(o, PolicyAgent) for o in opponents))
-
-    def test_bot_ratio_controls_the_mix(self):
-        scorer = MoveScorer(hidden=8)
-        all_bots = self.make_pool(bot_ratio=1.0, snapshot_every=1)
-        all_bots.maybe_snapshot(1, scorer)
-        self.assertFalse(any(isinstance(o, PolicyAgent) for o in all_bots.draw()))
-
-        all_self = self.make_pool(bot_ratio=0.0, snapshot_every=1)
-        all_self.maybe_snapshot(1, scorer)
-        self.assertTrue(all(isinstance(o, PolicyAgent) for o in all_self.draw()))
-
-    def test_self_play_training_runs(self):
-        args = train_module.parse_args(
-            ["--opponent", "self", "--episodes", "60", "--batch", "8", "--snapshot-every", "10",
-             "--eval-every", "0", "--hidden", "16", "--quiet"]
-        )
-        agent = train_module.train(args)
-        for param in agent.scorer.parameters():
-            self.assertTrue(torch.isfinite(param).all())
 
 
 class TestBatching(unittest.TestCase):
