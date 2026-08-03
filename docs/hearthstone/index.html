@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>简化版炉石传说</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font: 14px/1.5 -apple-system, sans-serif; background: #1a1a2e; color: #eee; padding: 10px; max-width: 800px; margin: 0 auto; }
+h1 { font-size: 18px; text-align: center; padding: 10px 0; }
+h1 a { color: #888; font-size: 13px; text-decoration: none; }
+#model-info { text-align: center; color: #888; font-size: 12px; margin-bottom: 8px; }
+
+.board { border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+.side { padding: 8px 12px; min-height: 60px; }
+.enemy { background: #2a1a1a; }
+.friendly { background: #1a2a1a; }
+.middle { text-align: center; padding: 4px; background: #222; font-size: 12px; color: #aaa; }
+.turn { font-weight: bold; color: #ccc; }
+
+.hero { font-weight: bold; }
+.hp { color: #e55; font-size: 16px; }
+
+.minion { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
+    padding: 2px 6px; margin: 2px; font-size: 11px; }
+.minion:hover { border-color: #ff0; }
+
+.hand { padding: 10px; text-align: center; font-size: 12px; color: #ccc; }
+
+.actions { padding: 10px; text-align: center; }
+.actions button { margin: 2px 3px; padding: 4px 10px; border: 1px solid #555; border-radius: 4px;
+    background: #333; color: #eee; cursor: pointer; font-size: 12px; }
+.actions button:hover { background: #555; }
+.group { margin: 6px 0; }
+
+#log { margin-top: 10px; padding: 8px; border: 1px solid #333; border-radius: 4px;
+    height: 200px; overflow-y: auto; font-size: 11px; color: #aaa; background: #111; line-height: 1.6; }
+
+.result { text-align: center; padding: 40px; }
+.result button { margin-top: 20px; padding: 10px 30px; font-size: 16px;
+    border: 1px solid #555; border-radius: 4px; background: #333; color: #eee; cursor: pointer; }
+</style>
+</head>
+<body onload="init()">
+<h1>简化版炉石传说 <a href="..">← 回首页</a></h1>
+<div id="model-info">加载中...</div>
+<div id="app"></div>
+<div id="log"></div>
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
