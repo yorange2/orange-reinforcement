@@ -33,11 +33,32 @@ def make_norm(norm: str, width: int) -> List[nn.Module]:
     raise ValueError(f"未知的归一化方式 {norm!r}，可选: {', '.join(NORMS)}")
 
 
+class ResidualBlock(nn.Module):
+    """Linear + LayerNorm + ReLU，可选残差连接 x + f(x)。"""
+
+    def __init__(self, dim: int, norm: str = "layer", residual: bool = False) -> None:
+        super().__init__()
+        self.linear = nn.Linear(dim, dim)
+        self.norm_layers = nn.Sequential(*make_norm(norm, dim)) if make_norm(norm, dim) else None
+        self.relu = nn.ReLU()
+        self.residual = residual
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.linear(x)
+        if self.norm_layers is not None:
+            out = self.norm_layers(out)
+        out = self.relu(out)
+        if self.residual:
+            out = x + out
+        return out
+
+
 class MoveScorer(nn.Module):
     """给单个候选动作打分。输入 (候选数, FEATURE_DIM)，输出 (候选数,)。"""
 
     def __init__(
-        self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2, norm: str = "layer"
+        self, dim: int = FEATURE_DIM, hidden: int = 128, layers: int = 2,
+        norm: str = "layer", residual: bool = False,
     ) -> None:
         super().__init__()
         if layers < 1:
@@ -47,14 +68,18 @@ class MoveScorer(nn.Module):
         self.hidden = hidden
         self.layers = layers
         self.norm = norm
+        self.residual = residual
 
         blocks: List[nn.Module] = []
         in_dim = dim
-        for _ in range(layers):
-            blocks.append(nn.Linear(in_dim, hidden))
-            blocks.extend(make_norm(norm, hidden))
-            blocks.append(nn.ReLU())
-            in_dim = hidden
+        for i in range(layers):
+            if residual and i > 0:
+                blocks.append(ResidualBlock(hidden, norm, True))
+            else:
+                blocks.append(nn.Linear(in_dim, hidden))
+                blocks.extend(make_norm(norm, hidden))
+                blocks.append(nn.ReLU())
+                in_dim = hidden
         blocks.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*blocks)
 
@@ -69,15 +94,19 @@ class MoveScorer(nn.Module):
 class ValueNet(nn.Module):
     """估计当前局面的期望回报，用作基线。"""
 
-    def __init__(self, dim: int = STATE_DIM, hidden: int = 64, layers: int = 1, norm: str = "layer") -> None:
+    def __init__(self, dim: int = STATE_DIM, hidden: int = 64, layers: int = 1,
+                 norm: str = "layer", residual: bool = False) -> None:
         super().__init__()
         blocks: List[nn.Module] = []
         in_dim = dim
-        for _ in range(layers):
-            blocks.append(nn.Linear(in_dim, hidden))
-            blocks.extend(make_norm(norm, hidden))
-            blocks.append(nn.ReLU())
-            in_dim = hidden
+        for i in range(layers):
+            if residual and i > 0:
+                blocks.append(ResidualBlock(hidden, norm, True))
+            else:
+                blocks.append(nn.Linear(in_dim, hidden))
+                blocks.extend(make_norm(norm, hidden))
+                blocks.append(nn.ReLU())
+                in_dim = hidden
         blocks.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*blocks)
 
@@ -167,6 +196,7 @@ def save_agent(path: str, scorer: MoveScorer, value: Optional[ValueNet] = None,
             "hidden": scorer.hidden,
             "layers": scorer.layers,
             "norm": scorer.norm,
+            "residual": scorer.residual,
             "feature_dim": scorer.dim,
             "meta": meta or {},
         },
@@ -181,7 +211,8 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
             f"模型是用 {blob['feature_dim']} 维特征训练的，当前特征是 {FEATURE_DIM} 维"
         )
     scorer = MoveScorer(
-        hidden=blob["hidden"], layers=blob.get("layers", 2), norm=blob.get("norm", "none")
+        hidden=blob["hidden"], layers=blob.get("layers", 2), norm=blob.get("norm", "none"),
+        residual=blob.get("residual", False),
     ).to(device)
     scorer.load_state_dict(blob["scorer"])
     scorer.eval()
