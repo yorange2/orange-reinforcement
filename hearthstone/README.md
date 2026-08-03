@@ -7,7 +7,8 @@
 ```bash
 .venv/bin/python -m hearthstone.play                # 跟 rule 打一局
 .venv/bin/python -m hearthstone.play --watch        # 观战两个机器人互打
-.venv/bin/python -m hearthstone.arena --games 800   # 规则对手的胜率矩阵
+.venv/bin/python -m hearthstone.train               # 训练（默认 2000 局，约 12 秒）
+.venv/bin/python -m hearthstone.bench --model hearthstone/models/agent.pt
 .venv/bin/python -m unittest discover -s hearthstone/tests -t .
 ```
 
@@ -120,16 +121,38 @@
 对角线全在 50% 附近，口径没偏。`random` 打 `greedy` 几乎赢不了，因为它连
 "把水晶用完"都做不到。
 
-## 给强化学习准备的接口
+## 强化学习
 
-动作空间是变长的（跟跑得快一样），所以 `paodekuai/policy.py` 那套
-「逐动作打分 + 只在合法动作上 softmax + PPO」可以直接搬过来。
+和跑得快完全一样的架构：`(局面, 动作) -> 48 维特征`，同一个打分网络逐个给候选动作
+打分，只在合法动作上 softmax，PPO 训练。23k 参数（2×128 + LayerNorm）。
 
-```python
-obs = game.observe()          # 该谁走，他能看到什么
-obs.legal                     # List[Action]，长度每步都不一样，且永远非空（end 总在）
-game.step(obs.legal[i])
+```bash
+.venv/bin/python -m hearthstone.train                               # 默认 PPO 2000 局，约 12 秒
+.venv/bin/python -m hearthstone.train --episodes 20000              # 正式训练再拉长
+.venv/bin/python -m hearthstone.train --algo reinforce              # 切 REINFORCE 做对照
+.venv/bin/python -m hearthstone.train --opponent mix --save hearthstone/models/agent.pt
 ```
+
+每格 600 局，先后手轮换，随机基准 50%：
+
+| 选手 | vs random | vs greedy | vs rule |
+| --- | --- | --- | --- |
+| **agent.pt (23k, PPO 2 万局)** | 99.7% | **53.7%** | 43.5% |
+| rule | 100.0% | 57.7% | 47.5% |
+| greedy | 99.5% | 49.8% | 40.5% |
+| random | 48.0% | 0.5% | 0.3% |
+
+> 仓库里带了训练好的权重 `hearthstone/models/agent.pt`（44 KB）。
+
+训练速度约 156 局/秒（CPU），2 万局约两分钟。模型打 greedy 已经有 53.7%——
+超过随机基准线，说明确实在学。离 rule 的 57.7% 还差 4 个百分点，但在二十几分钟的
+预算内已经是站得住的结果了。
+
+**当前特征（48 维）**：前 30 维描述动作本身（动作类型 one-hot、打出哪张牌的费用/身材/
+11 个关键词、用哪个随从去攻击、对方目标是什么），后 18 维描述局面（水晶、血量、
+场面总攻/总血/嘲讽/圣盾数、手牌数、牌堆剩余、bias）。
+
+### 动作空间
 
 `Action` 三种：
 
