@@ -1,13 +1,13 @@
 // 核对 docs/engine.js 的移植有没有走样。
 //
 // 拿 Python 导出的真实局面，用 JS 重算合法动作、特征和打分，三者必须逐一对上。
-// 用法：node tools/parity_check.mjs
+// 用法：node paodekuai/tools/parity_check.mjs
 
 import { readFileSync } from 'node:fs';
-import * as E from '../docs/engine.js';
+import * as E from '../../docs/paodekuai/engine.js';
 
 const cases = JSON.parse(readFileSync(new URL('./parity_cases.json', import.meta.url)));
-const model = JSON.parse(readFileSync(new URL('../docs/model.json', import.meta.url)));
+const model = JSON.parse(readFileSync(new URL('../../docs/paodekuai/model.json', import.meta.url)));
 
 let worstFeature = 0, worstScore = 0;
 const failures = [];

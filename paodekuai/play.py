@@ -5,11 +5,11 @@
 这样你能直观看到它凭什么这么打。
 
 用法：
-    python play.py                        # 你 vs 2 个模型（默认）
-    python play.py --opponent rule        # 换成规则机器人
-    python play.py --hint                 # 每步先看模型建议，再自己决定
-    python play.py --watch                # 观战，回车逐步推进
-    python play.py --no-explain           # 关掉打分展示，只看牌
+    python -m paodekuai.play                        # 你 vs 2 个模型（默认）
+    python -m paodekuai.play --opponent rule        # 换成规则机器人
+    python -m paodekuai.play --hint                 # 每步先看模型建议，再自己决定
+    python -m paodekuai.play --watch                # 观战，回车逐步推进
+    python -m paodekuai.play --no-explain           # 关掉打分展示，只看牌
 
 轮到你时可以输入：
     编号      出对应的牌
@@ -27,11 +27,11 @@ import random
 from collections import Counter
 from typing import List, Optional, Sequence, Tuple
 
-from paodekuai.bots import make_bot
-from paodekuai.cards import RANK_NAMES, hand_to_str
-from paodekuai.combos import KIND_NAMES_CN, KINDS, Combo
-from paodekuai.features import attachment_ranks
-from paodekuai.game import Action, Game, Observation
+from .bots import make_bot
+from .cards import RANK_NAMES, hand_to_str
+from .combos import KIND_NAMES_CN, KINDS, Combo
+from .features import attachment_ranks
+from .game import Action, Game, Observation
 
 WIDTH = 72
 QUIT = object()
@@ -92,7 +92,7 @@ def explain(agent, obs: Observation, top: int = 5) -> List[Tuple[Action, float, 
     """模型对每个候选的打分和概率，按概率从高到低。"""
     import torch
 
-    from paodekuai.features import batch_features
+    from .features import batch_features
 
     x = torch.from_numpy(batch_features(obs))
     with torch.no_grad():
@@ -231,7 +231,7 @@ class HumanPlayer:
 
 def make_player(kind: str, model_path: Optional[str], device: str):
     if kind == "model":
-        from paodekuai.policy import load_agent
+        from .policy import load_agent
 
         return load_agent(model_path, device=device)
     return make_bot(kind)
@@ -244,11 +244,11 @@ def run(args) -> int:
     agent = None
     if args.opponent == "model" or args.hint or args.watch:
         try:
-            from paodekuai.policy import load_agent
+            from .policy import load_agent
 
             agent = load_agent(args.model, device=args.device)
         except FileNotFoundError:
-            raise SystemExit(f"找不到权重 {args.model}，先训练一个：python train.py --save {args.model}")
+            raise SystemExit(f"找不到权重 {args.model}，先训练一个：python -m paodekuai.train --save {args.model}")
 
     seat = -1 if args.watch else args.seat % 3
     players = []
@@ -316,7 +316,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--opponent", default="model",
                         choices=["random", "greedy", "rule", "model"], help="对手类型（默认 model）")
-    parser.add_argument("--model", default="models/agent.pt", help="模型权重路径")
+    parser.add_argument("--model", default="paodekuai/models/agent.pt", help="模型权重路径")
     parser.add_argument("--hint", action="store_true", help="轮到你时先显示模型建议")
     parser.add_argument("--watch", action="store_true", help="观战模式，回车逐步推进")
     parser.add_argument("--no-explain", dest="explain", action="store_false",

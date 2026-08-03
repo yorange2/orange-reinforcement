@@ -7,11 +7,11 @@ import unittest
 
 import torch
 
-import export_weights
+import paodekuai.export_weights as export_weights
 from paodekuai.features import FEATURE_DIM, FEATURE_NAMES
 from paodekuai.policy import MoveScorer, ValueNet, save_agent
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestExport(unittest.TestCase):
@@ -72,15 +72,15 @@ class TestJavaScriptParity(unittest.TestCase):
     """网页版把引擎重写了一遍 JS，必须和 Python 算出一样的东西。"""
 
     def test_shipped_weights_and_engine_agree(self):
-        cases = os.path.join(ROOT, "tools", "parity_cases.json")
+        cases = os.path.join(ROOT, "paodekuai", "tools", "parity_cases.json")
         if not os.path.exists(cases):
             subprocess.run(
-                ["python", "tools/parity_export.py", "--games", "8"],
+                ["python", "paodekuai/tools/parity_export.py", "--games", "8"],
                 cwd=ROOT, check=True, capture_output=True,
                 env={**os.environ, "PYTHONPATH": ROOT},
             )
         result = subprocess.run(
-            ["node", "tools/parity_check.mjs"], cwd=ROOT, capture_output=True, text=True
+            ["node", "paodekuai/tools/parity_check.mjs"], cwd=ROOT, capture_output=True, text=True
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("全部一致", result.stdout)

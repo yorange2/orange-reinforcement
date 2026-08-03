@@ -2,9 +2,9 @@
 """训练一个跑得快智能体，目标是打赢人为构造的规则算法。
 
 用法：
-    python train.py                                  # 默认 PPO 跑 2000 局，几秒钟出结果
-    python train.py --episodes 120000                # 要正式结果时再拉长
-    python train.py --opponent mix --save models/agent.pt
+    python -m paodekuai.train                                  # 默认 PPO 跑 2000 局，几秒钟出结果
+    python -m paodekuai.train --episodes 120000                # 要正式结果时再拉长
+    python -m paodekuai.train --opponent mix --save paodekuai/models/agent.pt
 
 默认局数刻意压得很小：探索阶段要的是快速看方向对不对。PPO 跑 2000 局对 2xrule 就有约 49%
 （跑满 12 万局也才 51%），足够判断一个改动有没有效果。
@@ -21,10 +21,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from paodekuai.arena import evaluate_all, final_reward, format_table
-from paodekuai.bots import make_bot
-from paodekuai.game import play_game
-from paodekuai.policy import (NORMS, MoveScorer, PolicyAgent, Step, ValueNet,
+from .arena import evaluate_all, final_reward, format_table
+from .bots import make_bot
+from .game import play_game
+from .policy import (NORMS, MoveScorer, PolicyAgent, Step, ValueNet,
                               discounted_returns, evaluate_batch, make_batch,
                               save_agent)
 
@@ -182,7 +182,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(format_table(stats))
 
     print("\n规则对手互相对打作为参照")
-    from paodekuai.arena import bot_vs_bot
+    from .arena import bot_vs_bot
 
     for a, b in [("greedy", "rule"), ("rule", "greedy"), ("rule", "rule")]:
         print(f"  {a:<7} vs 2x{b:<7} {bot_vs_bot(a, b, games=args.final_eval_games, seed=999)}")

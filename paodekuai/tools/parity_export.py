@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""导出真实对局中的局面，供 tools/parity_check.mjs 核对 JS 移植是否走样。
+"""导出真实对局中的局面，供 paodekuai/tools/parity_check.mjs 核对 JS 移植是否走样。
 
 每个局面记下 Python 算出的合法动作、特征矩阵和网络打分，JS 那边从同样的局面
 出发重算一遍，三者必须逐一对上。牌统一编码成整数 rank * 4 + suit。
@@ -29,8 +29,8 @@ def dump_move(move) -> Optional[List[int]]:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--games", type=int, default=60, help="跑多少局取样")
-    parser.add_argument("--model", default="models/agent.pt")
-    parser.add_argument("--out", default="tools/parity_cases.json")
+    parser.add_argument("--model", default="paodekuai/models/agent.pt")
+    parser.add_argument("--out", default="paodekuai/tools/parity_cases.json")
     args = parser.parse_args(argv)
 
     agent = load_agent(args.model)

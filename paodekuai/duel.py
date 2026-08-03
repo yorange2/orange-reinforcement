@@ -7,8 +7,8 @@
 选手写法：random / greedy / rule / model:权重路径
 
 用法：
-    python duel.py model:models/agent_big.pt model:models/agent.pt rule
-    python duel.py model:models/agent_big.pt model:models/agent.pt   # 一大 vs 两小
+    python -m paodekuai.duel model:models/agent_big.pt model:paodekuai/models/agent.pt rule
+    python -m paodekuai.duel model:models/agent_big.pt model:paodekuai/models/agent.pt   # 一大 vs 两小
 """
 
 from __future__ import annotations
@@ -16,14 +16,14 @@ from __future__ import annotations
 import argparse
 from typing import List, Optional, Tuple
 
-from paodekuai.arena import match
-from paodekuai.bots import make_bot
+from .arena import match
+from .bots import make_bot
 
 
 def make_player(spec: str, device: str) -> Tuple[str, object]:
     """把 'rule' 或 'model:路径' 变成 (显示名, 选手)。"""
     if spec.startswith("model:"):
-        from paodekuai.policy import load_agent
+        from .policy import load_agent
 
         path = spec.split(":", 1)[1]
         agent = load_agent(path, device=device)

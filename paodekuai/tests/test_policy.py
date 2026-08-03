@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import torch
 
-import train as train_module
+import paodekuai.train as train_module
 from paodekuai.bots import make_bot
 from paodekuai.cards import parse_card
 from paodekuai.combos import classify
@@ -16,7 +16,7 @@ from paodekuai.game import Game, play_game
 from paodekuai.policy import (MoveScorer, PolicyAgent, Step, ValueNet,
                               discounted_returns, evaluate_batch, load_agent,
                               make_batch, save_agent)
-from tests.test_bots import observation
+from paodekuai.tests.test_bots import observation
 
 
 def cards(*names):

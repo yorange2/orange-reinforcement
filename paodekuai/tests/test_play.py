@@ -3,12 +3,12 @@ import io
 import random
 import unittest
 
-import play
+import paodekuai.play as play
 from paodekuai.cards import parse_card
 from paodekuai.combos import classify
 from paodekuai.game import Game
 from paodekuai.policy import MoveScorer, PolicyAgent
-from tests.test_bots import observation
+from paodekuai.tests.test_bots import observation
 
 
 def cards(*names):

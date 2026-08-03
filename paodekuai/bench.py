@@ -5,8 +5,8 @@
 所有选手打的是同一批牌局，所以横向可比。
 
 用法：
-    python bench.py                              # 只比规则对手
-    python bench.py --model models/agent.pt      # 把模型也放进来
+    python -m paodekuai.bench                              # 只比规则对手
+    python -m paodekuai.bench --model paodekuai/models/agent.pt      # 把模型也放进来
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from __future__ import annotations
 import argparse
 from typing import List, Optional
 
-from paodekuai.arena import evaluate
-from paodekuai.bots import make_bot
+from .arena import evaluate
+from .bots import make_bot
 
 OPPONENTS = ["random", "greedy", "rule"]
 
@@ -31,7 +31,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     contenders = []
     for path in args.model:
-        from paodekuai.policy import load_agent
+        from .policy import load_agent
 
         agent = load_agent(path, device=args.device)
         label = f"{path.split('/')[-1]}({agent.scorer.n_params / 1000:.0f}k)"

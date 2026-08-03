@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跑得快 · 和强化学习模型对战</title>
+<meta name="description" content="浏览器里直接跟一个用 PPO 训练的跑得快模型对战，每步都能看到它对每手牌的打分。">
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #1c1b19; --dim: #6b6862; --line: #e2ded7;
+    --card: #fff; --accent: #c2410c; --good: #15803d; --shade: #f2efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16151a; --fg: #eceaf0; --dim: #94909d; --line: #2e2c36;
+      --card: #1e1d24; --accent: #fb923c; --good: #4ade80; --shade: #26242d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem 1rem 4rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .3rem; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; font-size: .9rem; }
+  .sub a { color: var(--accent); }
+
+  .seats { display: grid; gap: .5rem; margin-bottom: 1rem; }
+  .seat {
+    display: flex; align-items: center; gap: .75rem; padding: .6rem .9rem;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  }
+  .seat.turn { border-color: var(--accent); }
+  .seat .who { font-weight: 600; min-width: 5.5rem; }
+  .seat .cnt { color: var(--dim); font-variant-numeric: tabular-nums; min-width: 4rem; }
+  .seat .last { color: var(--dim); font-size: .88rem; }
+  .tag {
+    font-size: .72rem; padding: .1rem .45rem; border-radius: 999px;
+    background: var(--shade); color: var(--dim);
+  }
+  .tag.lead { background: var(--accent); color: #fff; }
+
+  .board {
+    padding: .8rem .9rem; background: var(--shade); border-radius: 10px;
+    margin-bottom: 1.2rem;
+  }
+  .board .label { color: var(--dim); font-size: .82rem; }
+
+  .cards { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .35rem; }
+  .c {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 2.4rem; height: 2.9rem; padding: 0 .3rem; border-radius: 7px;
+    background: var(--card); border: 1px solid var(--line);
+    font-weight: 600; font-size: .95rem; cursor: pointer; user-select: none;
+    transition: transform .08s, border-color .08s;
+  }
+  .c.red { color: #dc2626; }
+  @media (prefers-color-scheme: dark) { .c.red { color: #f87171; } }
+  .c.on { transform: translateY(-7px); border-color: var(--accent); }
+  .c.dead { opacity: .35; cursor: default; }
+
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; align-items: center; }
+  button {
+    font: inherit; padding: .45rem 1rem; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  }
+  button.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .msg { color: var(--dim); font-size: .88rem; min-height: 1.4em; }
+  .msg.bad { color: var(--accent); }
+  .msg.win { color: var(--good); font-weight: 600; }
+
+  details { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  summary { cursor: pointer; color: var(--dim); font-size: .9rem; }
+  h2 { font-size: 1rem; margin: 1.6rem 0 .5rem; }
+
+  .think { margin: .4rem 0 0; }
+  .think .t { color: var(--dim); font-size: .82rem; margin-bottom: .35rem; }
+  .bar { display: grid; grid-template-columns: 1fr 3.2rem 5rem; gap: .5rem;
+         align-items: center; margin-bottom: .2rem; font-size: .85rem; }
+  .bar .mv { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar .pc { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .bar .g { height: .5rem; background: var(--shade); border-radius: 3px; overflow: hidden; }
+  .bar .g i { display: block; height: 100%; background: var(--accent); }
+  .log { max-height: 15rem; overflow-y: auto; font-size: .85rem; color: var(--dim); }
+  .log div { padding: .1rem 0; }
+  code { background: var(--shade); padding: .1rem .3rem; border-radius: 4px; font-size: .85em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>跑得快 · 和强化学习模型对战</h1>
+  <p class="sub">
+    对手是一个用 PPO 训练出来的策略网络（2.2 万参数，训练时的对手是手写的规则算法），完全在浏览器里本地运行，不联网。
+    它每次出牌前的打分都会展开给你看。
+    <a href="https://github.com/yorange2/orange-reinforcement/tree/main/paodekuai">源码与训练过程 →</a>
+  </p>
+
+  <div id="seats" class="seats"></div>
+
+  <div class="board">
+    <div class="label" id="boardLabel">加载模型中…</div>
+    <div class="cards" id="boardCards"></div>
+  </div>
+
+  <div id="thinkBox"></div>
+
+  <h2>你的手牌</h2>
+  <div class="cards" id="hand"></div>
+
+  <div class="row">
+    <button class="go" id="playBtn" disabled>出牌</button>
+    <button id="passBtn" disabled>不要</button>
+    <button id="hintBtn" disabled>模型建议</button>
+    <button id="clearBtn">取消选择</button>
+    <button id="newBtn">新开一局</button>
+  </div>
+  <p class="msg" id="msg"></p>
+
+  <details>
+    <summary>出牌记录</summary>
+    <div class="log" id="log"></div>
+  </details>
+
+  <details>
+    <summary>规则与说明</summary>
+    <p><strong>牌堆</strong>：54 张去掉大小王和四个 2，剩 48 张，每人 16 张。点数
+    3 &lt; 4 &lt; … &lt; K &lt; A，没有 2 和王。</p>
+    <p><strong>先手</strong>：谁摸到 ♦3 谁先出，且第一手必须包含 ♦3。</p>
+    <p><strong>牌型</strong>：单张、对子、三张、三带一、三带二、顺子（≥5 张）、连对（≥2 对）、
+    飞机（≥2 组连续三张，可带单或带对）、炸弹（四张同点，压任何非炸弹）。</p>
+    <p><strong>跟牌</strong>：同牌型、同长度、点数更大才能压；跟不起或不想跟就"不要"；
+    其余两家都不要之后，最后出牌的人重新自由出牌。先出完手牌者胜。</p>
+    <p><strong>怎么玩</strong>：点手牌选中，再点<code>出牌</code>。选错了点<code>取消选择</code>。</p>
+    <p><strong>那些打分是什么</strong>：模型给每个候选打一个分，再在当前合法的候选里做
+    softmax 得到概率，取最高的出。分数本身没有单位，只有相对大小有意义。</p>
+  </details>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

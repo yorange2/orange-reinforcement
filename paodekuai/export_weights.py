@@ -5,8 +5,8 @@
 以后改了网络结构（层数、宽度、要不要归一化）也不用动前端代码。
 
 用法：
-    python export_weights.py                      # models/agent.pt -> docs/model.json
-    python export_weights.py --model x.pt --out y.json
+    python -m paodekuai.export_weights                      # paodekuai/models/agent.pt -> docs/model.json
+    python -m paodekuai.export_weights --model x.pt --out y.json
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from paodekuai.features import FEATURE_DIM, FEATURE_NAMES
-from paodekuai.policy import load_agent
+from .features import FEATURE_DIM, FEATURE_NAMES
+from .policy import load_agent
 
 #: 权重保留几位小数。6 位对 float32 足够，JSON 体积能小三成。
 PRECISION = 6
@@ -54,8 +54,8 @@ def dump_layers(net: nn.Sequential) -> List[dict]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default="models/agent.pt", help="权重路径")
-    parser.add_argument("--out", default="docs/model.json", help="导出到哪里")
+    parser.add_argument("--model", default="paodekuai/models/agent.pt", help="权重路径")
+    parser.add_argument("--out", default="docs/paodekuai/model.json", help="导出到哪里")
     args = parser.parse_args(argv)
 
     agent = load_agent(args.model)
