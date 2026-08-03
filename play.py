@@ -15,7 +15,7 @@
     编号      出对应的牌
     3 3 3 4   直接报牌（不用管花色，程序会挑一手合法的）
     p         过
-    ?         看全部候选
+    ?         重新列一遍候选
     m         问模型这一手它会怎么打
     q         退出
 """
@@ -29,7 +29,8 @@ from typing import List, Optional, Sequence, Tuple
 
 from paodekuai.bots import make_bot
 from paodekuai.cards import RANK_NAMES, hand_to_str
-from paodekuai.combos import Combo
+from paodekuai.combos import KIND_NAMES_CN, KINDS, Combo
+from paodekuai.features import attachment_ranks
 from paodekuai.game import Action, Game, Observation
 
 WIDTH = 72
@@ -129,16 +130,48 @@ def show_hand(hand) -> None:
     print(f"\n  你的手牌 ({len(hand)} 张): {hand_to_str(hand)}")
 
 
-def show_menu(obs: Observation, limit: int = 10) -> List[Action]:
-    plays = sorted((m for m in obs.legal if m is not None), key=lambda m: (len(m.cards), m.rank))
-    shown: List[Action] = plays[:limit]
+def move_label(move: Combo) -> str:
+    """只显示牌面，牌型由分组标题给出。带牌的牌型把主体和带牌分开写。"""
+    attached = attachment_ranks(move)
+    if attached:
+        body = [c for c in move.cards if c.rank not in attached]
+        kicker = [c for c in move.cards if c.rank in attached]
+        return f"{hand_to_str(body)} 带 {hand_to_str(kicker)}"
+    return hand_to_str(move.cards)
+
+
+def show_menu(obs: Observation) -> List[Action]:
+    """列出**全部**候选，按牌型分组、逐行排布。返回的顺序就是编号顺序。"""
+    plays = [m for m in obs.legal if m is not None]
+    shown: List[Action] = []
+
+    for kind in KINDS:
+        group = sorted((m for m in plays if m.kind == kind), key=lambda m: (m.length, m.rank))
+        if not group:
+            continue
+
+        entries = []
+        for move in group:
+            entries.append((len(shown), move_label(move)))
+            shown.append(move)
+
+        head = pad(f"    {KIND_NAMES_CN[kind]}", 14)
+        line, used = head, 14
+        for index, label in entries:
+            cell = f"[{index}] {label}"
+            width = sum(2 if ord(ch) > 0x2E7F else 1 for ch in cell) + 3
+            if used + width > WIDTH and used > 14:
+                print(line)
+                line, used = pad("", 14), 14
+            line += pad(cell, width)
+            used += width
+        print(line.rstrip())
+
     if None in obs.legal:
+        print(f"{pad('    过', 14)}[{len(shown)}] 不要")
         shown.append(None)
 
-    for i, move in enumerate(shown):
-        print(f"    [{i}] {'过' if move is None else move}")
-    if len(plays) > limit:
-        print(f"    ... 另有 {len(plays) - limit} 种，输入 ? 看全部")
+    print(f"    —— 共 {len(shown)} 个候选")
     return shown
 
 
@@ -163,8 +196,7 @@ class HumanPlayer:
             if raw in ("q", "quit"):
                 return QUIT
             if raw == "?":
-                for i, move in enumerate(obs.legal):
-                    print(f"    [{i}] {'过' if move is None else move}")
+                options = show_menu(obs)
                 continue
             if raw in ("h", "help"):
                 print(HELP)

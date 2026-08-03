@@ -1,3 +1,5 @@
+import contextlib
+import io
 import random
 import unittest
 
@@ -65,6 +67,51 @@ class TestFindMove(unittest.TestCase):
 
     def test_empty_input_finds_nothing(self):
         self.assertIsNone(play.find_move("", observation(cards("3"))))
+
+
+class TestMenu(unittest.TestCase):
+    """候选要全部列出来——牌型多的时候有几十种，漏一个就选不到。"""
+
+    def biggest_menu(self):
+        from paodekuai.bots import make_bot
+
+        best = None
+        for seed in range(20):
+            game = Game(rng=random.Random(seed))
+            bots = [make_bot("rule") for _ in range(3)]
+            while not game.finished:
+                obs = game.observe()
+                if best is None or len(obs.legal) > len(best.legal):
+                    best = obs
+                game.step(bots[obs.player].choose(obs))
+        return best
+
+    def test_lists_every_legal_action(self):
+        obs = self.biggest_menu()
+        with contextlib.redirect_stdout(io.StringIO()):
+            shown = play.show_menu(obs)
+        self.assertGreater(len(shown), 20, "该找到一个候选很多的局面")
+        self.assertCountEqual([id(m) for m in shown], [id(m) for m in obs.legal])
+
+    def test_numbering_matches_the_returned_order(self):
+        obs = self.biggest_menu()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            shown = play.show_menu(obs)
+        text = out.getvalue()
+        for i in range(len(shown)):
+            self.assertIn(f"[{i}]", text)
+
+    def test_pass_is_listed_last_when_available(self):
+        obs = observation(cards("3", "4"), required=classify(cards("A")))
+        with contextlib.redirect_stdout(io.StringIO()):
+            shown = play.show_menu(obs)
+        self.assertIsNone(shown[-1])
+
+    def test_attachment_is_shown_separately(self):
+        move = classify(cards("9", "c9", "h9", "3"))
+        self.assertIn("带", play.move_label(move))
+        self.assertNotIn("带", play.move_label(classify(cards("9", "c9"))))
 
 
 class TestExplain(unittest.TestCase):
