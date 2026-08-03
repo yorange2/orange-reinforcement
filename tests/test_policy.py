@@ -323,12 +323,11 @@ class TestBatching(unittest.TestCase):
     def test_batched_scores_match_scoring_one_at_a_time(self):
         steps = self.steps([5, 11])
         scorer = MoveScorer(hidden=16)
-        batched, _, _ = evaluate_batch(scorer, None, make_batch(steps))
-
-        for i, step in enumerate(steps):
-            with torch.no_grad():
+        with torch.no_grad():
+            batched, _, _ = evaluate_batch(scorer, None, make_batch(steps))
+            for i, step in enumerate(steps):
                 alone = torch.log_softmax(scorer(step.features), dim=0)[step.action]
-            self.assertAlmostEqual(float(batched[i]), float(alone), places=5)
+                self.assertAlmostEqual(float(batched[i]), float(alone), places=5)
 
     def test_value_head_reads_the_state_slice(self):
         batch = make_batch(self.steps([6, 6]))

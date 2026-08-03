@@ -156,6 +156,43 @@ python3 -m venv .venv
 
 仓库里带了训练好的正式权重 `models/agent.pt`（95 KB），可以直接用。
 
+## 上手玩一局，顺便看模型在想什么
+
+```bash
+.venv/bin/python play.py
+```
+
+默认就是你 vs 两个训练好的模型。**每次模型出牌都会把它的打分摊开**——这是这个界面的重点，
+你能直接看到它凭什么这么打：
+
+```
+  玩家1 在想：
+    三带一[♣3 ♣7 ♥7 ♠7]                   2.91   90.6% ██████████████████
+    三带一[♠4 ♣7 ♥7 ♠7]                   0.62    9.2% ██
+    三带一[♦6 ♣7 ♥7 ♠7]                  -3.16    0.2%
+    三带一[♣7 ♥7 ♠7 ♦9]                 -10.19    0.0%
+  → 玩家1 三带一[♣3 ♣7 ♥7 ♠7]
+```
+
+同样是 777 带一张，它 90.6% 选了带 ♣3——把最没用的牌甩掉，而不是搭进 ♠4 或 ♦6。
+这正是[加"带牌点数"特征](#特征实验给模型看见带出去的是什么牌)那次实验想让它学会的事，
+现在能直接在对局里看到。
+
+轮到你时可以输入：
+
+| 输入 | 作用 |
+| --- | --- |
+| `1` | 出列表里 1 号那手牌 |
+| `3 5 5 5` | 直接报牌，不用管花色（也可以写成 `555 3`） |
+| `p` | 过 |
+| `?` | 列出全部候选（有时有几十种） |
+| `m` | 问模型这一手它会怎么打 |
+| `q` | 退出 |
+
+其他几个开关：`--hint` 每步自动显示模型建议（可以对着比自己的选择），
+`--watch` 观战三家互打、回车逐步推进，`--no-explain` 关掉打分展示只看牌，
+`--opponent rule` 换成规则机器人当对手。
+
 ## 游戏规则
 
 采用常见的三人 16 张变体：
@@ -313,7 +350,7 @@ train.py        训练脚本（含定期评测）
 bench.py        统一口径的胜率基准表
 duel.py         三方混战：任意三个选手同桌，每副牌打满 6 种座位排列
 play.py         人机对战 / 观战
-tests/          121 个单元测试
+tests/          138 个单元测试
 models/agent.pt 正式权重：PPO + 42 维特征 + LayerNorm + 12 万局对 rule 训练，2 层 x 128 宽
 ```
 
@@ -336,9 +373,10 @@ models/agent.pt 正式权重：PPO + 42 维特征 + LayerNorm + 12 万局对 rul
 .venv/bin/python duel.py model:models/agent.pt rule greedy --deals 300
 
 # 对战 / 观战
-.venv/bin/python play.py --opponent rule          # 你 vs 2 个规则机器人
-.venv/bin/python play.py --opponent model --model models/agent.pt
-.venv/bin/python play.py --watch --model models/agent.pt   # 只看机器互打
+.venv/bin/python play.py                          # 你 vs 2 个模型（默认）
+.venv/bin/python play.py --hint                   # 每步先看模型建议再自己决定
+.venv/bin/python play.py --opponent rule          # 换成规则机器人
+.venv/bin/python play.py --watch                  # 观战，回车逐步推进
 ```
 
 ## 测试
@@ -347,7 +385,7 @@ models/agent.pt 正式权重：PPO + 42 维特征 + LayerNorm + 12 万局对 rul
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-121 个测试，约 3 秒。除了常规的牌型和引擎规则，有五个值得一提：
+138 个测试，约 3 秒。除了常规的牌型和引擎规则，有五个值得一提：
 
 - **牌型往返一致性**：随机发几百手牌，枚举出的每一个合法动作都要能被 `classify()`
   反向识别成同样的牌型、点数和连长——生成器和识别器互相验证。
