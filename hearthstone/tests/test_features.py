@@ -121,7 +121,7 @@ class TestStateFeatures(unittest.TestCase):
 
         from hearthstone.features import S_BASE, S_WEAPON, S_HAND, S_HAND_CARDS, S_SPELLS, S_BOARD
         slot_start = S_BASE + S_WEAPON + S_HAND + S_HAND_CARDS + S_SPELLS + S_BOARD
-        STRIDE = 7
+        STRIDE = 9        # 攻/血/能动/嘲讽/圣盾/剧毒/吸血 + 亡语/触发
         my_slots = feats[slot_start:slot_start + STRIDE * 7]
         # uid 升序：5, 10, 20 → slot 0 = uid=5 (atk=5), slot 1 = uid=10 (atk=1), slot 2 = uid=20 (atk=3)
         self.assertAlmostEqual(my_slots[0], 5 / 10.0)              # uid=5 atk
@@ -164,8 +164,11 @@ class TestStateFeatures(unittest.TestCase):
         # going_first 在 bias(1.0) 之前
         self.assertIn(feats[-2], (0.0, 1.0))
         # 验证与 Observation 一致
-        from hearthstone.features import S_BASE, S_WEAPON, S_HAND, S_HAND_CARDS, S_SPELLS, S_BOARD, S_BOARD_SLOTS, S_KEYWORDS, S_LETHAL
-        gf_offset = S_BASE + S_WEAPON + S_HAND + S_HAND_CARDS + S_SPELLS + S_BOARD + S_BOARD_SLOTS + S_KEYWORDS + S_LETHAL + 4  # deck/en_hand/en_fatigue = 3, then going_first
+        from hearthstone.features import (S_BASE, S_WEAPON, S_HAND, S_HAND_CARDS, S_SPELLS,
+                                          S_BOARD, S_BOARD_SLOTS, S_KEYWORDS, S_TEXT, S_LETHAL)
+        gf_offset = (S_BASE + S_WEAPON + S_HAND + S_HAND_CARDS + S_SPELLS + S_BOARD
+                     + S_BOARD_SLOTS + S_KEYWORDS + S_TEXT + S_LETHAL
+                     + 4)   # deck/en_hand/en_fatigue = 3，再往后才是 going_first
         self.assertEqual(feats[gf_offset], 1.0 if obs.going_first else 0.0)
 
 
@@ -227,3 +230,63 @@ class TestOracleIsolation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCardTextFeatures(unittest.TestCase):
+    """卡面文本必须能被特征区分开。
+
+    加这一块之前，水元素和同费同身材的白板随从编码完全一样，模型不可能学会
+    "这张牌打出去会冻结对方"。这组测试守住这条。
+    """
+
+    def _play_feats(self, card_name: str):
+        from hearthstone.cards import CARD_INDEX, POOL
+        from hearthstone.features import action_features
+        from hearthstone.game import PLAY, Action, Minion
+        game = Game(rng=random.Random(0))
+        game.current = 0
+        game.mana = [10, 10]
+        game.max_mana = [10, 10]
+        game.hands = [[POOL[CARD_INDEX[card_name]]], []]
+        game.boards = [[], [Minion.summon(POOL[CARD_INDEX["幽灵"]], 1)]]
+        obs = game.observe()
+        act = next(a for a in obs.legal if a.kind == PLAY)
+        return action_features(obs, act)
+
+    def test_trigger_minion_differs_from_vanilla(self):
+        """水元素 4 费 3/6 带触发 vs 绿洲钳嘴龟 4 费 2/7 白板。"""
+        self.assertNotEqual(self._play_feats("水元素"), self._play_feats("绿洲钳嘴龟"))
+
+    def test_battlecry_flag_is_set(self):
+        from hearthstone.features import A_TYPE, A_CARD
+        feats = self._play_feats("工程师学徒")          # 战吼：抽一张牌
+        text = feats[A_TYPE + A_CARD:A_TYPE + A_CARD + 5]
+        self.assertEqual(text[0], 1.0, "战吼标签")
+        self.assertEqual(text[1], 0.0, "没有亡语")
+
+    def test_deathrattle_flag_is_set(self):
+        from hearthstone.features import A_TYPE, A_CARD
+        feats = self._play_feats("恐狼前锋")            # 亡语：召唤一个恐狼
+        text = feats[A_TYPE + A_CARD:A_TYPE + A_CARD + 5]
+        self.assertEqual(text[1], 1.0, "亡语标签")
+
+    def test_aura_flag_is_set(self):
+        from hearthstone.features import A_TYPE, A_CARD
+        feats = self._play_feats("团队领袖")
+        text = feats[A_TYPE + A_CARD:A_TYPE + A_CARD + 5]
+        self.assertEqual(text[2], 1.0, "光环标签")
+
+    def test_vanilla_minion_has_empty_text_block(self):
+        from hearthstone.features import A_TEXT, A_TYPE, A_CARD
+        feats = self._play_feats("冰风雪人")
+        block = feats[A_TYPE + A_CARD:A_TYPE + A_CARD + A_TEXT]
+        self.assertEqual(block, [0.0] * A_TEXT, "白板随从整块为零")
+
+    def test_deathrattle_visible_on_board(self):
+        from hearthstone.cards import CARD_INDEX, POOL
+        from hearthstone.features import _board_slot_feature
+        from hearthstone.game import Minion
+        plain = _board_slot_feature(Minion.summon(POOL[CARD_INDEX["幽灵"]], 1))
+        rattler = _board_slot_feature(Minion.summon(POOL[CARD_INDEX["恐狼前锋"]], 2))
+        self.assertEqual(plain[-2], 0.0)
+        self.assertEqual(rattler[-2], 1.0, "场上的亡语随从要能被看见")
