@@ -71,27 +71,40 @@ class TestPlanIsolation(unittest.TestCase):
         agent.bind_game(game, seat)
         return agent
 
+    @staticmethod
+    def _game_with_choices() -> Game:
+        """找一个"轮到玩家 0 且有多个合法动作"的开局。
+
+        不要硬编码种子——卡池一变，某个固定种子的起手牌就可能只剩"结束回合"
+        一个选项，测试会莫名其妙地失效。
+        """
+        for seed in range(50):
+            game = Game(rng=random.Random(seed))
+            if game.current == 0 and len(game.legal_actions(0)) > 1:
+                return game
+        raise AssertionError("50 个种子里没找到有多个选择的开局")
+
     def test_stale_plan_is_discarded_on_new_turn(self):
-        game = Game(rng=random.Random(0))
+        game = self._game_with_choices()
         agent = self._agent(game)
         obs = game.observe()
-        self.assertGreater(len(obs.legal), 1, "这个局面要有多个选择，测试才有意义")
 
-        bogus = END_TURN
-        agent._plan = [bogus, bogus]
+        # 用两个哨兵填满计划。END_TURN 不适合当哨兵——搜索本来就可能合法地选它。
+        sentinel = [END_TURN, END_TURN, END_TURN]
+        agent._plan = list(sentinel)
         agent._plan_turn = obs.turn - 1        # 属于上一个回合的计划
 
-        action = agent.choose(obs)
+        agent.choose(obs)
         self.assertEqual(agent._plan_turn, obs.turn, "计划应该为当前回合重新搜过")
-        self.assertNotIn(bogus, [action], "陈旧计划不该被执行")
+        self.assertNotEqual(agent._plan, sentinel[1:],
+                            "陈旧计划应该被整个丢掉，而不是被逐个消费")
 
     def test_plan_is_reused_within_a_turn(self):
-        game = Game(rng=random.Random(0))
+        game = self._game_with_choices()
         agent = self._agent(game)
         obs = game.observe()
         agent.choose(obs)
-        turn_after_first = agent._plan_turn
-        self.assertEqual(turn_after_first, obs.turn)
+        self.assertEqual(agent._plan_turn, obs.turn)
 
     def test_every_action_belongs_to_the_current_turn(self):
         """打完整局，每次出手时计划都必须属于当前回合。"""
@@ -124,7 +137,7 @@ class TestSearchAgent(unittest.TestCase):
 
     def test_requires_bind_game(self):
         agent = TurnSearchAgent(UnifiedNet(), beam=4, seed=0)
-        game = Game(rng=random.Random(0))
+        game = TestPlanIsolation._game_with_choices()   # 只有一个动作时会走捷径返回
         with self.assertRaises(RuntimeError):
             agent.choose(game.observe())
 

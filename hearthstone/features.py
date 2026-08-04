@@ -114,7 +114,7 @@ def oracle_features(obs: Observation) -> np.ndarray:
     burst = 0
     for c in playable:
         if c.spell:
-            burst += c.spell_damage + c.spell_missiles
+            burst += c.fx.damage + c.fx.missiles
         elif c.has("冲锋"):
             burst += c.attack
 
@@ -165,7 +165,7 @@ def _play(obs: Observation, action: Action) -> List[float]:
     kw = _kw_vec(card.keywords)
     left = obs.mana - card.cost
     target_is_hero = action.target == HERO
-    is_targeted_spell = card.spell_damage > 0 or card.spell_transform
+    is_targeted_spell = card.fx.damage > 0 or card.fx.transform
     target_is_minion = not target_is_hero and is_targeted_spell
 
     if target_is_minion and action.target < len(obs.enemy_board):
@@ -409,14 +409,14 @@ def _spell_awareness(obs: Observation) -> List[float]:
 
 def _spell_flags(cards: List) -> List[float]:
     """给定一组牌，返回是否含直伤/AOE/硬解法术。局面特征和先知特征共用。"""
-    has_damage = any(c.spell_damage > 0 or c.spell_missiles > 0 for c in cards)
+    has_damage = any(c.fx.damage > 0 or c.fx.missiles > 0 for c in cards)
     has_aoe = any(
-        c.spell_aoe_enemy_minions > 0 or c.spell_aoe_all_enemies > 0
-        or c.spell_aoe_all > 0 or c.spell_splash > 0
+        c.fx.aoe_enemy_minions > 0 or c.fx.aoe_all_enemies > 0
+        or c.fx.aoe_all > 0 or c.fx.splash > 0
         for c in cards
     )
     has_removal = any(
-        c.spell_transform or c.spell_destroy_all or c.spell_brawl
+        c.fx.transform or c.fx.destroy_all or c.fx.brawl
         for c in cards
     )
     return [

@@ -79,7 +79,7 @@ class GreedyBot(Bot):
         # 伤害法术：优先打脸
         for action in obs.playable():
             card = obs.hand[action.source]
-            if card.spell_damage > 0 and action.target == HERO:
+            if card.fx.damage > 0 and action.target == HERO:
                 return action
 
         # 攻击：优先级 打脸 > 打嘲讽
@@ -93,15 +93,15 @@ class GreedyBot(Bot):
         # 伤害/变形法术：打随从
         for action in obs.playable():
             card = obs.hand[action.source]
-            if (card.spell_damage > 0 or card.spell_transform) and action.target != HERO:
+            if (card.fx.damage > 0 or card.fx.transform) and action.target != HERO:
                 return action
 
         # AoE / 清场 / 抽牌 / 飞弹：有就用
         for action in obs.playable():
             card = obs.hand[action.source]
-            if (card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0
-                    or card.spell_aoe_all > 0 or card.spell_destroy_all or card.spell_brawl
-                    or card.spell_draw > 0 or card.spell_missiles > 0):
+            if (card.fx.aoe_enemy_minions > 0 or card.fx.aoe_all_enemies > 0
+                    or card.fx.aoe_all > 0 or card.fx.destroy_all or card.fx.brawl
+                    or card.fx.draw > 0 or card.fx.missiles > 0):
                 return action
 
         # 出牌：贵 → 便宜
@@ -302,16 +302,16 @@ class RuleBot(Bot):
         for action in obs.playable():
             card = obs.hand[action.source]
             score = -999.0
-            if card.spell_damage > 0 or card.spell_transform:
+            if card.fx.damage > 0 or card.fx.transform:
                 score = self._damage_spell_score(obs, action)
-            elif card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0:
+            elif card.fx.aoe_enemy_minions > 0 or card.fx.aoe_all_enemies > 0 or card.fx.aoe_all > 0:
                 score = self._aoe_score(obs, card)
-            elif card.spell_destroy_all or card.spell_brawl:
+            elif card.fx.destroy_all or card.fx.brawl:
                 score = self._board_clear_score(obs, card)
-            elif card.spell_draw > 0:
+            elif card.fx.draw > 0:
                 if obs.mana >= card.cost + 2:
-                    score = float(card.spell_draw)
-            elif card.spell_missiles > 0:
+                    score = float(card.fx.draw)
+            elif card.fx.missiles > 0:
                 if obs.enemy_board:
                     score = 3.0
             if score > best_score:
@@ -321,7 +321,7 @@ class RuleBot(Bot):
 
     def _aoe_score(self, obs: Observation, card) -> float:
         """AoE 价值：看能打到几个敌方随从，清掉多少体量。"""
-        dmg = card.spell_aoe_enemy_minions or card.spell_aoe_all_enemies or card.spell_aoe_all
+        dmg = card.fx.aoe_enemy_minions or card.fx.aoe_all_enemies or card.fx.aoe_all
         en_board = obs.enemy_board
         if not en_board:
             return 0.0
@@ -333,10 +333,10 @@ class RuleBot(Bot):
             else:
                 value += dmg * 0.3  # 打残
         # AoE 打到英雄也有价值
-        if card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0:
+        if card.fx.aoe_all_enemies > 0 or card.fx.aoe_all > 0:
             value += dmg * 0.5  # 打脸
         # 打到自己的惩罚
-        if card.spell_aoe_all > 0:
+        if card.fx.aoe_all > 0:
             for m in obs.board:
                 value -= min(dmg, m.health) * 0.3
             value -= dmg * 0.5  # 打自己
@@ -356,7 +356,7 @@ class RuleBot(Bot):
 
     def _damage_spell_score(self, obs: Observation, action: Action) -> float:
         card = obs.hand[action.source]
-        dmg = card.spell_damage
+        dmg = card.fx.damage
         if action.target == HERO:
             # 打脸：伤害价值 + 斩杀权重
             urgency = 1.0 + max(0.0, 10 - obs.enemy_hero_health) / 5.0

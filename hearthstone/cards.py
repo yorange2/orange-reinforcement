@@ -15,15 +15,14 @@
     扰咒  不能成为法术和英雄技能的目标
     法术增强  自己的法术伤害 +1
 
-最后两个在当前版本里**不产生任何效果**——这版没有法术（除了幸运币）也没有英雄技能，
-"不能被指向"和"法术伤害 +1"都无从触发。卡还是照原样收进来了，关键词会显示、也会进
-特征向量，等以后加了法术就直接生效。
+十个关键词全部生效。扰咒挡的是**指定目标**——AoE、溅射和奥术飞弹的随机伤害照样
+打得到它；法术增强只加**伤害**，变形、消灭、乱斗、抽牌都不受影响。
 """
 
 from __future__ import annotations
 
 import random
-from typing import Dict, List, NamedTuple, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------- 关键词
 
@@ -46,23 +45,74 @@ KEYWORDS: Tuple[str, ...] = (
 )
 KEYWORD_INDEX: Dict[str, int] = {word: i for i, word in enumerate(KEYWORDS)}
 
-#: 这两个在当前版本里没有效果，原因见模块文档。
-INERT_KEYWORDS: Tuple[str, ...] = (ELUSIVE, SPELL_DAMAGE)
+#: 曾经有两个关键词没实现，现在全部生效了。留空元组是为了不破坏外部引用。
+INERT_KEYWORDS: Tuple[str, ...] = ()
+
+
+class Effect(NamedTuple):
+    """一段可结算的效果。**法术、战吼、亡语共用同一套结算**。
+
+    这样"对目标造成 3 点伤害"的战吼和火球术就是同一段代码，加卡的时候只需要描述
+    效果，不需要再往引擎里塞分支。结算见 `game.Game._resolve`。
+
+    `needs_target` 为真的效果在出牌时要指定目标；扰咒的随从不能被指定。
+    """
+
+    # --- 伤害（都吃法术增强，且都在 _resolve 里统一 +bonus）---
+    damage: int = 0                 # 对指定目标
+    splash: int = 0                 # 目标以外的敌方随从（横扫）
+    missiles: int = 0               # 随机 1 点伤害 N 次
+    aoe_enemy_minions: int = 0
+    aoe_all_enemies: int = 0        # 敌方随从 + 英雄
+    aoe_all: int = 0                # 所有角色，含自己和自己的随从
+
+    # --- 恢复与增益 ---
+    heal: int = 0                   # 对指定目标
+    buff_attack: int = 0
+    buff_health: int = 0
+    #: 增益/治疗作用于谁："target" / "friendly"（己方全体）/ "friendly_others"（己方其他）
+    scope: str = "target"
+    grant: Tuple[str, ...] = ()     # 赋予关键词
+
+    # --- 牌与场面 ---
+    draw: int = 0
+    summon: str = ""                # 衍生物卡名，见 TOKENS
+    summon_count: int = 0
+
+    # --- 冻结 ---
+    freeze_target: bool = False     # 冻结指定的那个角色（寒冰箭、冰霜元素）
+    freeze_enemy_minions: bool = False   # 冻结所有敌方随从（冰霜新星、暴风雪）
+
+    # --- 特殊 ---
+    transform: bool = False         # 变成 1/1 绵羊
+    destroy_target: bool = False
+    destroy_all: bool = False
+    brawl: bool = False             # 随机只留一个随从
+
+    @property
+    def needs_target(self) -> bool:
+        """要不要在出牌时指定一个目标。"""
+        return bool(
+            self.damage or self.transform or self.destroy_target or self.freeze_target
+            or (self.heal and self.scope == "target")
+            or ((self.buff_attack or self.buff_health or self.grant)
+                and self.scope == "target")
+        )
+
+    @property
+    def deals_damage(self) -> bool:
+        return bool(self.damage or self.splash or self.missiles
+                    or self.aoe_enemy_minions or self.aoe_all_enemies or self.aoe_all)
 
 
 class CardDef(NamedTuple):
     """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。
 
-    `spell_damage` > 0: 对单个目标造成伤害（需指定目标）
-    `spell_draw` > 0: 抽 N 张牌
-    `spell_missiles` > 0: 随机对敌方目标造成 N 次 1 点伤害
-    `spell_aoe_enemy_minions` > 0: 对敌方所有随从造成伤害
-    `spell_aoe_all_enemies` > 0: 对敌方随从+英雄造成伤害
-    `spell_aoe_all` > 0: 对所有角色造成伤害（含自己和自己的随从）
-    `spell_splash` > 0: 配合 spell_damage，对目标以外的敌方造成伤害（横扫）
-    `spell_transform`: 变形术——把目标变成 1/1
-    `spell_destroy_all`: 消灭所有随从
-    `spell_brawl`: 绝命乱斗——随机留一个
+    卡面文本一律用 `Effect` 描述，三个入口共用同一套结算：
+
+        effect       法术本身的效果（`spell=True` 时）
+        battlecry    随从/武器出场时触发
+        deathrattle  随从死亡时触发
     """
 
     name: str
@@ -72,16 +122,24 @@ class CardDef(NamedTuple):
     keywords: Tuple[str, ...] = ()
     spell: bool = False
     weapon: bool = False
-    spell_damage: int = 0
-    spell_draw: int = 0
-    spell_missiles: int = 0
-    spell_aoe_enemy_minions: int = 0
-    spell_aoe_all_enemies: int = 0
-    spell_aoe_all: int = 0
-    spell_splash: int = 0
-    spell_transform: bool = False
-    spell_destroy_all: bool = False
-    spell_brawl: bool = False
+    effect: Optional[Effect] = None
+    battlecry: Optional[Effect] = None
+    deathrattle: Optional[Effect] = None
+
+    @property
+    def fx(self) -> "Effect":
+        """卡面效果，没有就给一个全零的 `Effect`。
+
+        让调用方可以直接写 `card.fx.damage` 而不用每处判空——白板随从的每个字段
+        都是 0，语义上正好。
+        """
+        return self.effect or _NO_EFFECT
+
+    @property
+    def needs_target(self) -> bool:
+        """出这张牌要不要指定目标——法术看 effect，随从/武器看 battlecry。"""
+        source = self.effect if self.spell else self.battlecry
+        return source is not None and source.needs_target
 
     @property
     def stats(self) -> int:
@@ -110,8 +168,31 @@ class CardDef(NamedTuple):
         return f"{self.name}({self.cost}费 {self.attack}/{self.health}{tail})"
 
 
+#: `CardDef.fx` 在卡面没有效果时返回它——每个字段都是 0。
+_NO_EFFECT = Effect()
+
 #: 后手的补偿，和炉石一致：本回合额外获得一个法力水晶。
 THE_COIN = CardDef("幸运币", 0, spell=True)
+
+#: 变形术的产物。
+SHEEP = CardDef("绵羊", 1, 1, 1)
+
+#: 衍生物：只会被召唤到场上，**永远不会进手牌**，所以不进 POOL、也不参与构筑。
+#:
+#: 卡池必须是"闭"的——任何能进手牌的卡都得在 POOL 里，否则智能体会拿到特征编码
+#: 里从没见过的东西。衍生物只出现在场上，而场上随从的特征用的是身材和关键词、
+#: 不是卡牌身份，所以它们天然可编码。发现和随机生成卡牌的效果则一律不收。
+TOKENS: Dict[str, CardDef] = {
+    card.name: card
+    for card in [
+        SHEEP,
+        CardDef("恐狼", 1, 1, 1),
+        CardDef("小鬼", 1, 1, 1),
+        CardDef("骷髅", 1, 1, 1),
+        CardDef("鱼人斥候", 1, 1, 1),
+        CardDef("镀银之手新兵", 1, 1, 1),
+    ]
+}
 
 
 def _m(name: str, cost: int, attack: int, health: int, *keywords: str) -> CardDef:
@@ -122,61 +203,40 @@ def _w(name: str, cost: int, attack: int, durability: int) -> CardDef:
     return CardDef(name, cost, attack, durability, weapon=True)
 
 
-def _sd(name: str, cost: int, damage: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_damage=damage)
+def _spell(name: str, cost: int, **effect) -> CardDef:
+    """一张法术。效果字段直接透传给 `Effect`。"""
+    return CardDef(name, cost, spell=True, effect=Effect(**effect))
 
 
-def _sdraw(name: str, cost: int, draw: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_draw=draw)
+def _mb(name: str, cost: int, attack: int, health: int, *keywords: str,
+        **battlecry) -> CardDef:
+    """带战吼的随从。"""
+    return CardDef(name, cost, attack, health, tuple(keywords),
+                   battlecry=Effect(**battlecry))
 
 
-def _smissiles(name: str, cost: int, missiles: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_missiles=missiles)
-
-
-def _saoe_minions(name: str, cost: int, damage: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_aoe_enemy_minions=damage)
-
-
-def _saoe_enemies(name: str, cost: int, damage: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_aoe_all_enemies=damage)
-
-
-def _saoe_all(name: str, cost: int, damage: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_aoe_all=damage)
-
-
-def _sswipe(name: str, cost: int, target_dmg: int, splash: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_damage=target_dmg, spell_splash=splash)
-
-
-def _stransform(name: str, cost: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_transform=True)
-
-
-def _sdestroy(name: str, cost: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_destroy_all=True)
-
-
-def _sbrawl(name: str, cost: int) -> CardDef:
-    return CardDef(name, cost, spell=True, spell_brawl=True)
+def _md(name: str, cost: int, attack: int, health: int, *keywords: str,
+        **deathrattle) -> CardDef:
+    """带亡语的随从。"""
+    return CardDef(name, cost, attack, health, tuple(keywords),
+                   deathrattle=Effect(**deathrattle))
 
 
 #: 卡池，按费用排序。索引即卡牌 id，编码特征时可以直接用。
 POOL: List[CardDef] = [
     # ---- 法术
-    _smissiles("奥术飞弹", 1, 3),
-    CardDef("刀扇", 3, spell=True, spell_aoe_enemy_minions=1, spell_draw=1),
-    _sdraw("奥术智慧", 3, 2),
-    _sd("火球术", 4, 6),
-    _stransform("变形术", 4),
-    _saoe_enemies("奉献", 4, 2),
-    _saoe_all("地狱烈焰", 4, 3),
-    _sswipe("横扫", 4, 4, 1),
-    _sbrawl("绝命乱斗", 5),
-    _saoe_minions("烈焰风暴", 7, 4),
-    _sdraw("疾跑", 7, 4),
-    _sdestroy("扭曲虚空", 8),
+    _spell("奥术飞弹", 1, missiles=3),
+    _spell("刀扇", 3, aoe_enemy_minions=1, draw=1),
+    _spell("奥术智慧", 3, draw=2),
+    _spell("火球术", 4, damage=6),
+    _spell("变形术", 4, transform=True),
+    _spell("奉献", 4, aoe_all_enemies=2),
+    _spell("地狱烈焰", 4, aoe_all=3),
+    _spell("横扫", 4, damage=4, splash=1),
+    _spell("绝命乱斗", 5, brawl=True),
+    _spell("烈焰风暴", 7, aoe_enemy_minions=4),
+    _spell("疾跑", 7, draw=4),
+    _spell("扭曲虚空", 8, destroy_all=True),
     # ---- 武器：纯白板，只有攻/耐久
     _w("圣光的正义", 1, 1, 4),
     _w("炽炎战斧", 2, 3, 2),
@@ -231,12 +291,33 @@ POOL: List[CardDef] = [
     # ---- 复生
     _m("骸骨怨灵", 4, 2, 5, TAUNT, REBORN),
     _m("荒野刺客", 5, 4, 2, STEALTH, REBORN),
-    # ---- 扰咒 / 法术增强（当前版本里没有效果）
+    # ---- 扰咒 / 法术增强
     _m("精灵龙", 2, 3, 2, ELUSIVE),
     _m("狗头人地卜师", 2, 2, 2, SPELL_DAMAGE),
     _m("达拉然法师", 3, 1, 4, SPELL_DAMAGE),
     _m("食人魔法师", 4, 4, 4, SPELL_DAMAGE),
     _m("大法师", 6, 4, 7, SPELL_DAMAGE),
+    # ---- 战吼（核心系列，第一批）
+    _mb("工程师学徒", 1, 1, 1, draw=1),
+    _mb("闪金镇步兵长", 2, 2, 2, buff_attack=1, scope="friendly_others"),
+    _mb("北郡牧师", 3, 3, 2, heal=2, scope="target"),
+    _mb("阿古斯防御者", 4, 2, 3, grant=(TAUNT,), scope="friendly_others"),
+    _mb("火车王里诺艾", 5, 4, 2, damage=2),
+    _mb("暴风城勇士", 7, 6, 6, buff_attack=1, buff_health=1, scope="friendly_others"),
+    # ---- 亡语（核心系列，第一批）
+    _md("鱼人猎潮者", 2, 2, 1, summon="鱼人斥候", summon_count=1),
+    _md("恐狼前锋", 2, 2, 2, summon="恐狼", summon_count=1),
+    _md("巫毒医生", 2, 2, 1, summon="骷髅", summon_count=1),
+    _md("憎恶", 5, 4, 4, aoe_all=2),
+    _md("石爪野猪", 3, 3, 2, summon="小鬼", summon_count=1),
+    # ---- 冻结（法术）
+    _spell("冰霜震击", 1, damage=1, freeze_target=True),
+    _spell("寒冰箭", 2, damage=3, freeze_target=True),
+    _spell("冰霜新星", 3, freeze_enemy_minions=True),
+    _spell("暴风雪", 6, aoe_enemy_minions=2, freeze_enemy_minions=True),
+    # ---- 冻结（战吼）
+    _mb("冰川裂片", 1, 2, 1, freeze_target=True),
+    _mb("冰霜元素", 6, 5, 5, freeze_target=True),
 ]
 
 #: 卡名 -> 卡池下标。
