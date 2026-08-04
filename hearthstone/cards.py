@@ -105,6 +105,27 @@ class Effect(NamedTuple):
                     or self.aoe_enemy_minions or self.aoe_all_enemies or self.aoe_all)
 
 
+#: 光环的作用范围。
+AURA_OTHERS = "friendly_others"   # 你的**其他**随从（团队领袖、暴风城勇士）
+AURA_FRIENDLY = "friendly"        # 你的所有随从，含自己
+AURA_ADJACENT = "adjacent"        # 左右相邻的随从（炎锤先锋）
+
+
+class Aura(NamedTuple):
+    """光环：随从在场期间**持续**改变别的随从的属性，离场立刻还原。
+
+    和 `Effect` 里的 `buff_*` 是两回事——那个是一次性永久增益，这个是持续的、
+    随光环来源在不在场而生灭。所以它单独存一层（`Minion.aura_*`），由
+    `Game._refresh_auras` 整体重算，不做增量加减，避免累积漂移。
+    """
+
+    attack: int = 0
+    health: int = 0
+    scope: str = AURA_OTHERS
+    #: 只影响带这个关键词的随从（留空表示不限），例如"你的其他亡灵随从 +1/+1"
+    only_keyword: str = ""
+
+
 class CardDef(NamedTuple):
     """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。
 
@@ -125,6 +146,7 @@ class CardDef(NamedTuple):
     effect: Optional[Effect] = None
     battlecry: Optional[Effect] = None
     deathrattle: Optional[Effect] = None
+    aura: Optional[Aura] = None
 
     @property
     def fx(self) -> "Effect":
@@ -222,6 +244,12 @@ def _md(name: str, cost: int, attack: int, health: int, *keywords: str,
                    deathrattle=Effect(**deathrattle))
 
 
+def _ma(name: str, cost: int, attack: int, health: int, aura: Aura,
+        *keywords: str) -> CardDef:
+    """带光环的随从。光环显式传 `Aura`——它自己也有 attack/health，跟位置参数会撞名。"""
+    return CardDef(name, cost, attack, health, tuple(keywords), aura=aura)
+
+
 #: 卡池，按费用排序。索引即卡牌 id，编码特征时可以直接用。
 POOL: List[CardDef] = [
     # ---- 法术
@@ -303,7 +331,7 @@ POOL: List[CardDef] = [
     _mb("北郡牧师", 3, 3, 2, heal=2, scope="target"),
     _mb("阿古斯防御者", 4, 2, 3, grant=(TAUNT,), scope="friendly_others"),
     _mb("火车王里诺艾", 5, 4, 2, damage=2),
-    _mb("暴风城勇士", 7, 6, 6, buff_attack=1, buff_health=1, scope="friendly_others"),
+    _mb("恐怖的奴隶主", 5, 5, 4, buff_attack=1, buff_health=1, scope="friendly_others"),
     # ---- 亡语（核心系列，第一批）
     _md("鱼人猎潮者", 2, 2, 1, summon="鱼人斥候", summon_count=1),
     _md("恐狼前锋", 2, 2, 2, summon="恐狼", summon_count=1),
@@ -318,6 +346,11 @@ POOL: List[CardDef] = [
     # ---- 冻结（战吼）
     _mb("冰川裂片", 1, 2, 1, freeze_target=True),
     _mb("冰霜元素", 6, 5, 5, freeze_target=True),
+    # ---- 光环
+    _ma("团队领袖", 3, 2, 2, Aura(attack=1)),
+    _ma("石堡卫士", 4, 3, 4, Aura(health=1)),
+    _ma("暴风城勇士", 7, 6, 6, Aura(attack=1, health=1)),
+    _ma("炎锤先锋", 4, 3, 3, Aura(attack=1, scope=AURA_ADJACENT)),
 ]
 
 #: 卡名 -> 卡池下标。
