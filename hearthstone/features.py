@@ -22,7 +22,7 @@ from typing import List
 
 import numpy as np
 
-from .cards import KEYWORDS
+from .cards import KEYWORDS, Effect
 from .game import ATTACK, END, HERO, HERO_SOURCE, PLAY, Action, Observation
 
 N_KEYWORDS = len(KEYWORDS)
@@ -32,27 +32,37 @@ N_KEYWORDS = len(KEYWORDS)
 # 动作特征
 A_TYPE = 3                     # 动作类型 one-hot (play/attack/end)
 A_CARD = 1 + 2 + N_KEYWORDS    # 出牌：费用 + 攻/血 + 关键词 one-hot
+#: 卡面文本：先用 5 个标签说"有没有这类文本"，再用量级说"有多大"。
+#: 标签向量的思路来自 RosettaStone 的 game_tags——一张卡由一组固定的属性标签刻画。
+#: 没有这一块的话，水元素和同费同身材的白板随从在特征上完全一样。
+A_TEXT = 5 + 5 + 3 + 2 + 3     # 标签 + 战吼量级 + 亡语量级 + 光环量级 + 控制类效果
 A_ATTACKER = 2 + 1 + 1 + 1 + 1 + 1  # 攻击者：攻/血 + 剩余次数 + 圣盾/剧毒/吸血/风怒
 A_TARGET = 1 + 2 + 1 + 1 + 1    # 目标：人脸/攻/血 + 嘲讽/圣盾/剧毒
 A_TRADE = 2 + 1 + 1 + 1 + 1 + 1 + 1  # 交易结果：谁死 + 过杀 + 场面差 + 复生/吸血/冲锋突袭
 A_PLAY_EFFECT = 2 + 1           # 出牌效果：剩余水晶 + 用光/铺满
 A_LEGAL = 1                    # 候选动作数
 
-ACTION_DIM = A_TYPE + A_CARD + A_ATTACKER + A_TARGET + A_TRADE + A_PLAY_EFFECT + A_LEGAL
+ACTION_DIM = (A_TYPE + A_CARD + A_TEXT + A_ATTACKER + A_TARGET + A_TRADE
+              + A_PLAY_EFFECT + A_LEGAL)
 
 # 局面特征
 S_BASE = 1 + 1 + 1 + 1 + 1    # 水晶、血量
 S_WEAPON = 5                    # 武器：自己攻/耐久/已攻击 + 对方攻/耐久
 S_HAND = 1 + 1 + 2 + 1 + 1 + 1  # 手牌：张数 + 可出数 + 可出总攻/总血 + 有冲锋/有嘲讽/有突袭
 S_BOARD = 2 + 2 + 2 + 1        # 场面：随从数 + 总攻 + 总血 + 嘲讽挡脸
-S_BOARD_SLOTS = 7 * 7 + 7 * 7  # 双方场上逐随从（各7槽全覆盖）：攻/血/能动/嘲讽/圣盾/剧毒/吸血
+#: 双方场上逐随从（各 7 槽全覆盖）：攻/血/能动/嘲讽/圣盾/剧毒/吸血 + 亡语/触发。
+#: 后两维很重要——换掉一个带亡语的随从和换掉一个白板随从完全是两回事。
+S_BOARD_SLOTS = 7 * 9 + 7 * 9
+#: 场上文本感知：双方各有多少带亡语/触发/光环的随从，以及被冻结的数量。
+S_TEXT = 3 + 3 + 2
 S_HAND_CARDS = 5 * 3           # 手牌逐卡（前3低费可出）：费/攻/血/冲锋/突袭
 S_SPELLS = 3                    # 法术感知：直伤/AOE/硬解
 S_KEYWORDS = 4 + 4              # 双方场上关键词计数（剧毒/吸血/风怒/复生）
 S_LETHAL = 2                    # 斩杀检测
 S_OTHER = 1 + 1 + 1 + 1 + 1     # 牌堆/对手手牌/疲劳/bias/先后手
 
-STATE_DIM = S_BASE + S_WEAPON + S_HAND + S_BOARD + S_BOARD_SLOTS + S_HAND_CARDS + S_SPELLS + S_KEYWORDS + S_LETHAL + S_OTHER
+STATE_DIM = (S_BASE + S_WEAPON + S_HAND + S_BOARD + S_BOARD_SLOTS + S_HAND_CARDS
+             + S_SPELLS + S_KEYWORDS + S_TEXT + S_LETHAL + S_OTHER)
 
 STATE_OFFSET = ACTION_DIM
 FEATURE_DIM = ACTION_DIM + STATE_DIM
@@ -63,10 +73,13 @@ O_AGG = 6                       # 对手手牌聚合：总攻/总血/可出数/�
 O_FLAGS = 3                     # 对手下回合能出的牌里有冲锋/嘲讽/突袭
 O_CARDS = 3 * 5                 # 对手手牌逐卡（前 3 低费可出）：费/攻/血/冲锋/突袭
 O_SPELLS = 3                    # 对手手牌法术感知：直伤/AOE/硬解
+#: 对手手牌里的卡面文本：战吼/亡语/光环/触发各有几张。
+#: 不加这块的话，先知价值头和策略的信息差就只剩身材了——而现在一多半卡带文本。
+O_TEXT = 4
 O_BURST = 2                     # 对手手牌爆发：伤害总量 + 是否够斩杀我
 O_BIAS = 1
 
-ORACLE_DIM = O_AGG + O_FLAGS + O_CARDS + O_SPELLS + O_BURST + O_BIAS
+ORACLE_DIM = O_AGG + O_FLAGS + O_CARDS + O_SPELLS + O_TEXT + O_BURST + O_BIAS
 
 
 # ---------------------------------------------------------------- 对外接口
@@ -140,6 +153,11 @@ def oracle_features(obs: Observation) -> np.ndarray:
         *cards,
         # 法术感知
         *_spell_flags(playable),
+        # 手牌里的卡面文本
+        sum(1 for c in hand if c.battlecry) / 5.0,
+        sum(1 for c in hand if c.deathrattle) / 5.0,
+        sum(1 for c in hand if c.aura) / 5.0,
+        sum(1 for c in hand if c.trigger) / 5.0,
         # 爆发
         burst / 30.0,
         1.0 if burst >= obs.hero_health else 0.0,
@@ -151,6 +169,49 @@ def oracle_features(obs: Observation) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- 动作
+
+_EMPTY = Effect()
+
+
+def _card_text(card) -> List[float]:
+    """卡面文本的 `A_TEXT` 维编码：有没有这类文本 + 有多大。
+
+    白板随从这一整块全是 0，所以老卡的编码不受影响；带文本的卡才有信号。
+    """
+    bc = card.battlecry or _EMPTY
+    dr = card.deathrattle or _EMPTY
+    aura = card.aura
+    fx = card.fx
+    return [
+        # 标签：有没有这类文本
+        1.0 if card.battlecry else 0.0,
+        1.0 if card.deathrattle else 0.0,
+        1.0 if card.aura else 0.0,
+        1.0 if card.trigger else 0.0,
+        1.0 if (fx.condition or fx.then) else 0.0,
+        # 战吼量级
+        bc.damage / 10.0,
+        bc.draw / 3.0,
+        bc.summon_count / 3.0,
+        (bc.buff_attack + bc.buff_health) / 6.0,
+        1.0 if bc.freeze_target else 0.0,
+        # 亡语量级
+        (dr.damage + dr.aoe_all + dr.aoe_enemy_minions) / 10.0,
+        dr.draw / 3.0,
+        dr.summon_count / 3.0,
+        # 光环量级
+        (aura.attack if aura else 0) / 3.0,
+        (aura.health if aura else 0) / 3.0,
+        # 法术本体的控制类效果——伤害量级已经在别处编码，这里只补"非伤害"的部分
+        1.0 if fx.freeze_target else 0.0,
+        1.0 if fx.freeze_enemy_minions else 0.0,
+        1.0 if (fx.destroy_target or fx.destroy_all or fx.transform) else 0.0,
+    ]
+
+
+#: 攻击和结束回合没有"卡面文本"可言，整块置零。
+_NO_TEXT = [0.0] * A_TEXT
+
 
 def _base_features(obs: Observation, action: Action) -> List[float]:
     if action.kind == PLAY:
@@ -188,6 +249,8 @@ def _play(obs: Observation, action: Action) -> List[float]:
         card.attack / 10.0,
         card.health / 10.0,
         *kw,
+        # 卡面文本
+        *_card_text(card),
         # 攻击者（法术不需要）
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         # 目标（伤害法术直接写目标信息，其他置零）
@@ -255,6 +318,7 @@ def _attack(obs: Observation, action: Action) -> List[float]:
         # 卡牌（攻击时不涉及手牌）
         0.0, 0.0, 0.0,
         *([0.0] * N_KEYWORDS),
+        *_NO_TEXT,
         # 攻击者
         att.attack / 10.0,
         att.health / 10.0,
@@ -319,6 +383,7 @@ def _hero_attack_features(obs: Observation, action: Action) -> List[float]:
         0.0, 1.0, 0.0,    # 类型：attack
         0.0, 0.0, 0.0,     # 卡牌
         *([0.0] * N_KEYWORDS),
+        *_NO_TEXT,
         weapon_atk / 10.0,  # 攻击者（武器攻击）
         0.0,                # 攻击者血量（英雄血量在局面里）
         0.0, 1.0 if weapon_atk > 0 else 0.0, 0.0, 0.0, 0.0,  # 圣盾/剧毒/吸血/风怒
@@ -338,6 +403,7 @@ def _end() -> List[float]:
         0.0, 0.0, 1.0,
         0.0, 0.0, 0.0,
         *([0.0] * N_KEYWORDS),
+        *_NO_TEXT,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -349,7 +415,11 @@ def _end() -> List[float]:
 # ---------------------------------------------------------------- 局面
 
 def _board_slot_feature(m: "Minion") -> List[float]:
-    """单个随从的 7 维编码：攻/血/能动/嘲讽/圣盾/剧毒/吸血。"""
+    """单个随从的 9 维编码：攻/血/能动/嘲讽/圣盾/剧毒/吸血 + 亡语/触发。
+
+    最后两维是交易决策的关键——换掉一个带亡语的随从和换掉一个白板随从，
+    代价完全不同。"能动"那一维顺带覆盖了冻结（冻结的随从 `can_attack` 为假）。
+    """
     return [
         m.attack / 10.0,
         m.health / 10.0,
@@ -358,6 +428,8 @@ def _board_slot_feature(m: "Minion") -> List[float]:
         1.0 if m.divine_shield else 0.0,
         1.0 if m.has("剧毒") else 0.0,
         1.0 if m.has("吸血") else 0.0,
+        1.0 if m.card.deathrattle else 0.0,
+        1.0 if m.card.trigger else 0.0,
     ]
 
 
@@ -373,7 +445,7 @@ def _board_slots(board: List["Minion"], n: int = 7) -> List[float]:
         if i < len(sorted_board):
             feats.extend(_board_slot_feature(sorted_board[i]))
         else:
-            feats.extend([0.0] * 7)
+            feats.extend([0.0] * 9)
     return feats
 
 
@@ -490,6 +562,15 @@ def _state_features(obs: Observation) -> List[float]:
         float(sum(1 for m in en if m.has("吸血"))),
         float(sum(1 for m in en if m.has("风怒"))),
         float(sum(1 for m in en if m.reborn)),
+        # 场上文本感知：带亡语/触发/光环的随从有多少，以及被冻结的数量
+        float(sum(1 for m in my if m.card.deathrattle)),
+        float(sum(1 for m in my if m.card.trigger)),
+        float(sum(1 for m in my if m.card.aura)),
+        float(sum(1 for m in en if m.card.deathrattle)),
+        float(sum(1 for m in en if m.card.trigger)),
+        float(sum(1 for m in en if m.card.aura)),
+        float(sum(1 for m in my if m.frozen)),
+        float(sum(1 for m in en if m.frozen)),
         # 斩杀检测
         i_have_lethal,
         opp_has_lethal,
