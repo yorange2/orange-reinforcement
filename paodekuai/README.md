@@ -147,7 +147,7 @@ QQQ 带 ♣K   分数  1.58   概率  0.1%     <- 留大牌
 git clone https://github.com/yorange2/orange-reinforcement.git
 cd orange-reinforcement
 
-python3 -m venv .venv
+python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
 .venv/bin/python -m paodekuai.bench --model paodekuai/models/agent.pt   # 复现上面那张表
