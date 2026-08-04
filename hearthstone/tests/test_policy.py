@@ -14,6 +14,7 @@ from hearthstone.policy import (
     ValueNet,
     discounted_returns,
     evaluate_batch,
+    gae_advantages,
     load_agent,
     make_batch,
     save_agent,
@@ -155,6 +156,63 @@ class TestDiscountedReturns(unittest.TestCase):
     def test_negative_reward(self):
         ret = discounted_returns(-1.0, 3, 1.0)
         np.testing.assert_array_equal(ret, [-1.0, -1.0, -1.0])
+
+
+class TestGAE(unittest.TestCase):
+    """GAE(λ) 的行为约束。最关键的是 λ=1 必须复现引入 GAE 之前的实现。"""
+
+    def test_lambda_one_equals_monte_carlo(self):
+        """λ=1 ⇒ 优势 = 折扣回报 − V，价值目标 = 折扣回报。
+
+        这是安全绳：只要这条过，把 --gae-lambda 设成 1.0 就等价于旧行为。
+        """
+        rng = np.random.default_rng(0)
+        for n in (1, 2, 5, 37):
+            for reward in (1.0, -1.0, 0.3):
+                for gamma in (0.99, 0.9, 1.0):
+                    values = rng.normal(size=n).astype(np.float32)
+                    adv, target = gae_advantages(values, reward, gamma, lam=1.0)
+                    expected_target = discounted_returns(reward, n, gamma)
+                    np.testing.assert_allclose(target, expected_target, atol=1e-5)
+                    np.testing.assert_allclose(adv, expected_target - values, atol=1e-5)
+
+    def test_lambda_zero_is_one_step_td(self):
+        """λ=0 ⇒ 优势就是单步 TD 残差 δ_t。"""
+        values = np.array([0.2, -0.5, 0.4], dtype=np.float32)
+        gamma, reward = 0.9, 1.0
+        adv, _ = gae_advantages(values, reward, gamma, lam=0.0)
+        expected = [
+            gamma * values[1] - values[0],
+            gamma * values[2] - values[1],
+            reward - values[2],          # 终局，V(s_T) = 0
+        ]
+        np.testing.assert_allclose(adv, expected, atol=1e-6)
+
+    def test_target_is_adv_plus_values(self):
+        values = np.array([0.1, 0.2, -0.3, 0.5], dtype=np.float32)
+        for lam in (0.0, 0.5, 0.95, 1.0):
+            adv, target = gae_advantages(values, 1.0, 0.99, lam)
+            np.testing.assert_allclose(target, adv + values, atol=1e-6)
+
+    def test_perfect_value_gives_zero_advantage(self):
+        """如果 V 恰好等于真实折扣回报，优势应该处处为零——任意 λ 都成立。"""
+        n, gamma, reward = 8, 0.99, 1.0
+        values = discounted_returns(reward, n, gamma)
+        for lam in (0.0, 0.5, 0.95, 1.0):
+            adv, _ = gae_advantages(values, reward, gamma, lam)
+            np.testing.assert_allclose(adv, np.zeros(n), atol=1e-5)
+
+    def test_shrinking_lambda_shrinks_dependence_on_final_reward(self):
+        """λ 越小，早期步骤的优势对终局奖励越不敏感——这正是降方差的机制。"""
+        n, gamma = 30, 0.99
+        values = np.zeros(n, dtype=np.float32)
+        sens = {}
+        for lam in (1.0, 0.95, 0.5):
+            hi, _ = gae_advantages(values, 1.0, gamma, lam)
+            lo, _ = gae_advantages(values, -1.0, gamma, lam)
+            sens[lam] = abs(hi[0] - lo[0])       # 第 0 步对终局奖励的敏感度
+        self.assertGreater(sens[1.0], sens[0.95])
+        self.assertGreater(sens[0.95], sens[0.5])
 
 
 class TestSaveLoad(unittest.TestCase):

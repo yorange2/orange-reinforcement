@@ -5,10 +5,12 @@ import numpy as np
 
 from hearthstone.features import (
     FEATURE_DIM,
+    ORACLE_DIM,
     STATE_DIM,
     STATE_OFFSET,
     action_features,
     batch_features,
+    oracle_features,
     state_features,
 )
 from hearthstone.game import END_TURN, Game, attack, play
@@ -165,6 +167,62 @@ class TestStateFeatures(unittest.TestCase):
         from hearthstone.features import S_BASE, S_WEAPON, S_HAND, S_HAND_CARDS, S_SPELLS, S_BOARD, S_BOARD_SLOTS, S_KEYWORDS, S_LETHAL
         gf_offset = S_BASE + S_WEAPON + S_HAND + S_HAND_CARDS + S_SPELLS + S_BOARD + S_BOARD_SLOTS + S_KEYWORDS + S_LETHAL + 4  # deck/en_hand/en_fatigue = 3, then going_first
         self.assertEqual(feats[gf_offset], 1.0 if obs.going_first else 0.0)
+
+
+class TestOracleIsolation(unittest.TestCase):
+    """先知特征绝不能泄漏进策略看到的特征里。
+
+    这组测试守的是整个非对称 actor-critic 的正确性前提：策略只吃
+    `batch_features`，价值头才吃 `oracle_features`。一旦有人把 `enemy_hand`
+    接进 `_state_features`，这里会立刻红。
+    """
+
+    def _obs_pair(self):
+        """同一个局面，只有对手手牌不同的两个观测。"""
+        game = Game(rng=random.Random(7))
+        a = game.observe()
+        b = game.observe()
+        self.assertTrue(a.enemy_hand, "这个局面下对手应该有手牌，测试才有意义")
+        b.enemy_hand = []
+        return a, b
+
+    def test_policy_features_ignore_enemy_hand(self):
+        a, b = self._obs_pair()
+        np.testing.assert_array_equal(batch_features(a), batch_features(b))
+
+    def test_state_features_ignore_enemy_hand(self):
+        a, b = self._obs_pair()
+        self.assertEqual(state_features(a), state_features(b))
+
+    def test_oracle_features_do_react_to_enemy_hand(self):
+        """反过来，先知特征必须真的随对手手牌变化——否则它没起作用。"""
+        a, b = self._obs_pair()
+        self.assertFalse(np.array_equal(oracle_features(a), oracle_features(b)))
+
+    def test_oracle_shape_and_dtype(self):
+        game = Game(rng=random.Random(0))
+        vec = oracle_features(game.observe())
+        self.assertEqual(vec.shape, (ORACLE_DIM,))
+        self.assertEqual(vec.dtype, np.float32)
+
+    def test_oracle_empty_hand_is_zeros(self):
+        game = Game(rng=random.Random(0))
+        obs = game.observe()
+        obs.enemy_hand = []
+        np.testing.assert_array_equal(
+            oracle_features(obs), np.zeros(ORACLE_DIM, dtype=np.float32)
+        )
+
+    def test_oracle_features_finite(self):
+        """扫一整局，先知特征不能出现 nan/inf。"""
+        from hearthstone.bots import make_bot
+
+        game = Game(rng=random.Random(3))
+        bot = make_bot("rule", seed=3)
+        while not game.finished:
+            obs = game.observe()
+            self.assertTrue(np.all(np.isfinite(oracle_features(obs))))
+            game.step(bot.choose(obs))
 
 
 if __name__ == "__main__":

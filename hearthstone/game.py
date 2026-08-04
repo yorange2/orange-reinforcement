@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import copy
 import random
 from dataclasses import dataclass, field
 from typing import List, NamedTuple, Optional, Sequence
@@ -230,6 +231,16 @@ class Observation:
     going_first: bool               # 是否先手
     legal: List[Action]
 
+    #: **先知字段——违反上面那条"看不到的只给数量"的约定。**
+    #:
+    #: 对手的真实手牌。只允许非对称 actor-critic 的价值头在**训练时**读取：价值头
+    #: 不参与线上决策（推理时算都不算），所以给它作弊不会泄漏到实际打法里。
+    #:
+    #: 任何进入策略的东西都不许碰它——`features.state_features` /
+    #: `features.action_features` 和所有 `Bot` 一律不读，只有
+    #: `features.oracle_features` 读。改动时务必守住这条线。
+    enemy_hand: List[CardDef] = field(default_factory=list)
+
     @property
     def opponent(self) -> int:
         return 1 - self.player
@@ -331,6 +342,33 @@ class Game:
         self._begin_turn()
         return self.observe()
 
+    def clone(self, rng: Optional[random.Random] = None) -> "Game":
+        """复制一份可以随便乱走的局面，给搜索用。
+
+        比 `copy.deepcopy` 快约 200 倍（实测 1µs vs 191µs）：`CardDef` 是不可变的
+        NamedTuple，可以直接共享；只有 `Minion` 和几个 list 需要真的复制。
+
+        `rng` **不共享**——否则搜索会消耗掉真实对局的随机数，把真实牌序也搅乱。
+        默认给一个固定种子的新实例，让搜索可复现；代价是奥术飞弹和绝命乱斗这两张
+        带随机的卡在搜索里只按一种结果评估。
+        """
+        twin = object.__new__(Game)
+        twin.__dict__.update(self.__dict__)      # 先搬常量和标量
+        twin.rng = rng if rng is not None else random.Random(0)
+        # 会变的部分逐个复制
+        twin.decks = [list(deck) for deck in self.decks]
+        twin.hands = [list(hand) for hand in self.hands]
+        twin.boards = [[copy.copy(m) for m in board] for board in self.boards]
+        twin.burned = [list(b) for b in self.burned]
+        twin.hero_health = list(self.hero_health)
+        twin.mana = list(self.mana)
+        twin.max_mana = list(self.max_mana)
+        twin.fatigue = list(self.fatigue)
+        twin.weapons = list(self.weapons)
+        twin.weapon_durability = list(self.weapon_durability)
+        twin.hero_attacked = list(self.hero_attacked)
+        return twin
+
     def observe(self, player: Optional[int] = None) -> Observation:
         player = self.current if player is None else player
         enemy = 1 - player
@@ -358,6 +396,7 @@ class Game:
             enemy_fatigue=self.fatigue[enemy],
             going_first=(player == self.first),
             legal=self.legal_actions(player),
+            enemy_hand=list(self.hands[enemy]),      # 先知字段，见 Observation 的说明
         )
 
     def legal_actions(self, player: Optional[int] = None) -> List[Action]:
@@ -747,6 +786,12 @@ def play_game(
     """让 `players`（实现了 choose(obs) 的对象）打完一局。"""
     game = Game(rng=rng, first=first, **kwargs)
     log: List[str] = []
+
+    # 搜索型选手需要真实局面才能克隆推演；只看观测的选手没有这个方法，跳过即可
+    for seat, player in enumerate(players):
+        bind = getattr(player, "bind_game", None)
+        if bind is not None:
+            bind(game, seat)
 
     if verbose:
         for i in range(N_PLAYERS):

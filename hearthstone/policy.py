@@ -20,7 +20,14 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from .features import FEATURE_DIM, STATE_DIM, STATE_OFFSET, batch_features
+from .features import (
+    FEATURE_DIM,
+    ORACLE_DIM,
+    STATE_DIM,
+    STATE_OFFSET,
+    batch_features,
+    oracle_features,
+)
 from .game import Action, Observation
 
 NORMS = ("none", "layer")
@@ -59,6 +66,10 @@ class UnifiedNet(nn.Module):
 
     局面编码器只算一次；策略头把局面编码和每个候选动作的特征拼接后打分；
     价值头直接从局面编码预测期望回报。
+
+    `oracle_dim > 0` 时启用**非对称 actor-critic**（Suphx 的 oracle guiding 思路的
+    简化版）：先知特征只拼进价值头的输入，不进共享编码器，所以策略头拿不到它。
+    价值头只在训练时算，推理时根本不调用——线上打法完全不依赖先知信息。
     """
 
     def __init__(
@@ -69,6 +80,7 @@ class UnifiedNet(nn.Module):
         layers: int = 2,
         norm: str = "layer",
         residual: bool = False,
+        oracle_dim: int = 0,
     ) -> None:
         super().__init__()
         if layers < 1:
@@ -80,6 +92,7 @@ class UnifiedNet(nn.Module):
         self.layers = layers
         self.norm = norm
         self.residual = residual
+        self.oracle_dim = oracle_dim
 
         # --- 局面编码器：state_dim → hidden → ... → hidden ---
         enc: List[nn.Module] = []
@@ -105,10 +118,10 @@ class UnifiedNet(nn.Module):
         policy.append(nn.Linear(hidden, 1))
         self.policy_head = nn.Sequential(*policy)
 
-        # --- 价值头：hidden → hidden//2 → 1 ---
+        # --- 价值头：(hidden + oracle_dim) → hidden//2 → 1 ---
         value: List[nn.Module] = []
         vh = hidden // 2
-        value.append(nn.Linear(hidden, vh))
+        value.append(nn.Linear(hidden + oracle_dim, vh))
         value.extend(make_norm(norm, vh))
         value.append(nn.ReLU())
         value.append(nn.Linear(vh, 1))
@@ -118,12 +131,18 @@ class UnifiedNet(nn.Module):
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, features: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        features: torch.Tensor,
+        mask: torch.Tensor,
+        oracle: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """批量前向。
 
         Args:
             features: (S, M, FEATURE_DIM)  padded 特征矩阵
             mask:     (S, M) bool          有效候选掩码
+            oracle:   (S, oracle_dim)      先知特征，仅 oracle_dim > 0 时需要
 
         Returns:
             logits: (S, M)  候选动作 logits（padding 位置为 -inf）
@@ -135,8 +154,13 @@ class UnifiedNet(nn.Module):
         state = features[:, 0, self.action_dim:]          # (S, state_dim)
         state_emb = self.state_encoder(state)              # (S, hidden)
 
-        # 价值估计
-        values = self.value_head(state_emb).squeeze(-1)    # (S,)
+        # 价值估计。先知特征只在这里拼进来，不经过共享编码器，策略头看不到。
+        value_in = state_emb
+        if self.oracle_dim:
+            if oracle is None:
+                raise ValueError("网络启用了先知价值头，forward 必须传 oracle 特征")
+            value_in = torch.cat([state_emb, oracle], dim=-1)
+        values = self.value_head(value_in).squeeze(-1)     # (S,)
 
         # 策略：局面编码扩展到所有候选，拼接动作特征
         state_expanded = state_emb.unsqueeze(1).expand(S, M, self.hidden)   # (S, M, hidden)
@@ -149,21 +173,33 @@ class UnifiedNet(nn.Module):
 
         return logits, values
 
-    def forward_single(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_single(
+        self, x: torch.Tensor, oracle: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """单决策点前向（推理/采样用，无 padding）。
 
         Args:
-            x: (N, FEATURE_DIM) 特征矩阵
+            x:      (N, FEATURE_DIM) 特征矩阵
+            oracle: (oracle_dim,)    先知特征；不传则跳过价值估计
 
         Returns:
             logits: (N,)   候选动作 logits
-            value:  scalar 局面价值估计
+            value:  scalar 局面价值估计；启用先知价值头又没传 oracle 时为 None
         """
         N = x.shape[0]
 
         state = x[0, self.action_dim:]                     # (state_dim,)
         state_emb = self.state_encoder(state.unsqueeze(0))  # (1, hidden)
-        value = self.value_head(state_emb).squeeze()        # scalar
+
+        # 价值头不参与选动作。启用先知又没给先知特征时直接不算——推理路径本来就
+        # 丢弃这个值，省掉它既避免了拿零向量喂出假价值，也少一次前向。
+        value: Optional[torch.Tensor] = None
+        if self.oracle_dim == 0:
+            value = self.value_head(state_emb).squeeze()
+        elif oracle is not None:
+            value = self.value_head(
+                torch.cat([state_emb, oracle.unsqueeze(0)], dim=-1)
+            ).squeeze()
 
         state_expanded = state_emb.expand(N, self.hidden)   # (N, hidden)
         combined = torch.cat([state_expanded, x[:, :self.action_dim]], dim=-1)
@@ -206,6 +242,7 @@ class Step:
     features: torch.Tensor   # (候选数, FEATURE_DIM)
     action: int              # 选中的下标
     log_prob: float          # 采样时旧策略给的 log π(a|s)
+    oracle: Optional[torch.Tensor] = None   # (ORACLE_DIM,) 先知特征，只喂价值头
 
 
 @dataclass
@@ -246,6 +283,7 @@ class PolicyAgent:
         x = torch.from_numpy(batch_features(obs)).to(self.device)
 
         with torch.no_grad():
+            # 选动作只用策略头，不传 oracle——线上打法碰不到先知信息
             logits, _value = self.net.forward_single(x)
             scores = logits / self.temperature
             if not self.training:
@@ -254,8 +292,13 @@ class PolicyAgent:
             dist = Categorical(logits=scores)
             sampled = dist.sample()
             index = int(sampled.item())
+            # 先知特征只是存进轨迹，留给更新时的价值头
+            oracle = None
+            if self.net.oracle_dim:
+                oracle = torch.from_numpy(oracle_features(obs)).to(self.device)
             self.trajectory.steps.append(
-                Step(features=x, action=index, log_prob=float(dist.log_prob(sampled)))
+                Step(features=x, action=index,
+                     log_prob=float(dist.log_prob(sampled)), oracle=oracle)
             )
 
         return obs.legal[index]
@@ -282,6 +325,7 @@ def save_agent(path: str, net: UnifiedNet, meta: Optional[dict] = None) -> None:
             "state_dim": net.state_dim,
             "action_dim": net.action_dim,
             "feature_dim": net.action_dim + net.state_dim,
+            "oracle_dim": net.oracle_dim,
             "meta": meta or {},
         },
         path,
@@ -301,6 +345,7 @@ def load_agent(path: str, device: torch.device | str = "cpu") -> PolicyAgent:
         layers=blob.get("layers", 2),
         norm=blob.get("norm", "none"),
         residual=blob.get("residual", False),
+        oracle_dim=blob.get("oracle_dim", 0),
     ).to(device)
     # 兼容旧格式 (scorer/value 分别存) 和新格式 (state_dict)
     if "state_dict" in blob:
@@ -321,6 +366,7 @@ class Batch:
     mask: torch.Tensor       # (S, M) bool
     actions: torch.Tensor    # (S,)
     old_log_probs: torch.Tensor  # (S,)
+    oracle: Optional[torch.Tensor] = None    # (S, ORACLE_DIM)
 
     def __len__(self) -> int:
         return self.features.shape[0]
@@ -339,11 +385,16 @@ def make_batch(steps: Sequence[Step], device: torch.device | str = "cpu") -> Bat
         features[i, :n_moves] = step.features
         mask[i, :n_moves] = True
 
+    oracle = None
+    if steps[0].oracle is not None:
+        oracle = torch.stack([step.oracle for step in steps]).to(device)
+
     return Batch(
         features=features,
         mask=mask,
         actions=torch.tensor([step.action for step in steps], device=device),
         old_log_probs=torch.tensor([step.log_prob for step in steps], device=device),
+        oracle=oracle,
     )
 
 
@@ -357,7 +408,7 @@ def evaluate_batch(
         entropy:          (S,)  策略熵
         values:           (S,)  局面价值
     """
-    logits, values = net(batch.features, batch.mask)
+    logits, values = net(batch.features, batch.mask, batch.oracle)
 
     log_probs = torch.log_softmax(logits, dim=1)
     chosen = log_probs.gather(1, batch.actions.unsqueeze(1)).squeeze(1)
@@ -372,3 +423,41 @@ def evaluate_batch(
 def discounted_returns(final_reward: float, n_steps: int, gamma: float) -> np.ndarray:
     steps = np.arange(n_steps - 1, -1, -1, dtype=np.float32)
     return final_reward * (gamma ** steps)
+
+
+def gae_advantages(
+    values: np.ndarray, final_reward: float, gamma: float, lam: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """一局的 GAE(λ) 优势和价值目标（Schulman et al. 2015）。
+
+    奖励只在终局给，中间每步 r_t = 0，所以：
+
+        δ_t = γ·V(s_{t+1}) − V(s_t)          （t < T−1，V(s_T) = 0）
+        δ_{T−1} = R − V(s_{T−1})
+        A_t = δ_t + γλ·A_{t+1}
+
+    λ 在偏差和方差之间插值：λ=1 是无偏的蒙特卡洛，λ=0 是单步 TD 残差。
+
+    λ=1 时展开会 telescoping 成 `A_t = γ^(T−1−t)·R − V(s_t)`，价值目标退化成
+    `discounted_returns` —— 也就是精确复现引入 GAE 之前的行为，见测试。
+
+    Args:
+        values:       (T,) 这一局每个决策点的 V(s_t)，用旧策略算的
+        final_reward: 终局奖励
+        gamma:        折扣因子
+        lam:          GAE 的 λ
+
+    Returns:
+        advantages:    (T,)
+        value_targets: (T,)  = advantages + values
+    """
+    n = len(values)
+    adv = np.zeros(n, dtype=np.float32)
+    running = 0.0
+    for t in range(n - 1, -1, -1):
+        next_value = values[t + 1] if t + 1 < n else 0.0     # V(s_T) = 0
+        reward = final_reward if t == n - 1 else 0.0
+        delta = reward + gamma * next_value - values[t]
+        running = delta + gamma * lam * running
+        adv[t] = running
+    return adv, adv + values

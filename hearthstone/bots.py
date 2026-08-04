@@ -41,6 +41,14 @@ class Bot:
     def choose(self, obs: Observation) -> Action:  # pragma: no cover - 接口
         raise NotImplementedError
 
+    def bind_game(self, game, seat: int) -> None:
+        """开局时拿到真实的 `Game`，搜索型选手要靠它克隆局面往下推演。
+
+        默认什么都不做——只看观测的选手不需要这个。拿到 `Game` 就等于拿到了
+        对手手牌和牌序，实现方**必须自己守住信息边界**，参考
+        `search.TurnSearchAgent` 的做法（克隆后先洗掉自己的牌堆）。
+        """
+
 
 class RandomBot(Bot):
     """完全随机，胜率基准线。"""
