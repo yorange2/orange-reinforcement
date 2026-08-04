@@ -32,8 +32,10 @@ from .features import state_features
 from .game import END, END_TURN, HERO_HEALTH, Action, Game, Minion, Observation
 from .policy import UnifiedNet
 
-#: beam 宽度默认值。实测中位回合远小于这个数（穷举），只有后期满场回合会被截断。
-DEFAULT_BEAM = 24
+#: beam 宽度默认值。中位回合的序列数远小于这个数（等于穷举），只有双方满场的后期
+#: 回合才真的被截断。实测 8 和 24 强度一样（73.1% vs 72.1%，差异在噪声内），但 8 只
+#: 要一半时间（22ms vs 48ms/局），所以默认取 8。
+DEFAULT_BEAM = 8
 
 #: 一个回合最多允许多少个动作，防御性上限——正常回合 3~4 个，满场极端情况也就十几个。
 MAX_TURN_ACTIONS = 40
