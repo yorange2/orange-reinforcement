@@ -26,3 +26,7 @@ runs/
 # 校验用的中间产物，2MB，用 paodekuai/tools/parity_export.py 随时重新生成
 paodekuai/tools/parity_cases.json
 
+# pybind11 编译产物
+rosetta/rosetta_env*.so
+rosetta/native/build/
+
