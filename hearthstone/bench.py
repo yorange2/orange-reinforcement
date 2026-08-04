@@ -6,7 +6,6 @@
 用法：
     python -m hearthstone.bench                              # 只比规则对手
     python -m hearthstone.bench --model hearthstone/models/agent.pt   # 加上模型
-    python -m hearthstone.bench --model ... --search         # 再加一行整回合搜索
 """
 
 from __future__ import annotations
@@ -16,7 +15,8 @@ from typing import List, Optional
 
 from .arena import evaluate
 from .bots import make_bot
-from .search import DEFAULT_BEAM, TurnSearchAgent
+# 整回合搜索已移除——RosettaStone 环境下没有 clone()，暂时不用。
+# from .search import DEFAULT_BEAM, TurnSearchAgent
 
 OPPONENTS = ["random", "greedy", "rule"]
 
@@ -30,10 +30,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--games", type=int, default=600, help="每个组合打多少局（默认 600）")
     parser.add_argument("--seed", type=int, default=999, help="随机种子")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--search", action="store_true",
-                        help="每个模型再加一行整回合搜索的成绩")
-    parser.add_argument("--beam", type=int, default=DEFAULT_BEAM,
-                        help=f"搜索的 beam 宽度（默认 {DEFAULT_BEAM}）")
     args = parser.parse_args(argv)
 
     contenders = []
@@ -43,12 +39,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         agent = load_agent(path, device=args.device)
         label = f"{path.split('/')[-1]}({agent.net.n_params / 1000:.0f}k)"
         contenders.append((label, agent))
-        if args.search:
-            contenders.append((
-                f"{label} +搜索",
-                TurnSearchAgent(agent.net, beam=args.beam,
-                                device=args.device, seed=args.seed),
-            ))
+        # 搜索已移除
+        # if args.search:
+        #     contenders.append((
+        #         f"{label} +搜索",
+        #         TurnSearchAgent(agent.net, beam=args.beam,
+        #                         device=args.device, seed=args.seed),
+        #     ))
     contenders.extend((name, make_bot(name, seed=args.seed)) for name in reversed(OPPONENTS))
 
     width = max(len(name) for name, _ in contenders) + 2
