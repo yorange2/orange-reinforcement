@@ -27,7 +27,7 @@ from __future__ import annotations
 import copy
 import random
 from dataclasses import dataclass, field
-from typing import List, NamedTuple, Optional, Sequence
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 from .cards import (
     CHARGE,
@@ -37,10 +37,12 @@ from .cards import (
     POISONOUS,
     REBORN,
     RUSH,
+    SHEEP,
     SPELL_DAMAGE,
     STEALTH,
     TAUNT,
     THE_COIN,
+    TOKENS,
     WINDFURY,
     CardDef,
     build_decklist,
@@ -125,7 +127,11 @@ class Minion:
     divine_shield: bool = False
     stealth: bool = False
     reborn: bool = False
+    frozen: bool = False            # 冻结：这回合不能攻击，见 Game._thaw
     uid: int = 0
+    #: 被战吼/法术**临时赋予**的关键词。卡面自带的在 `card.keywords` 里，
+    #: 两边都算数——`has()` 会一起查。
+    granted: Tuple[str, ...] = ()
 
     @staticmethod
     def max_attacks(card: CardDef) -> int:
@@ -147,7 +153,7 @@ class Minion:
         )
 
     def has(self, keyword: str) -> bool:
-        return self.card.has(keyword)
+        return self.card.has(keyword) or keyword in self.granted
 
     @property
     def name(self) -> str:
@@ -164,7 +170,8 @@ class Minion:
 
     @property
     def can_attack(self) -> bool:
-        return self.attacks_left > 0 and self.attack > 0 and not self.asleep
+        return (self.attacks_left > 0 and self.attack > 0
+                and not self.asleep and not self.frozen)
 
     @property
     def can_hit_face(self) -> bool:
@@ -194,6 +201,9 @@ class Minion:
             if word == REBORN and not self.reborn:
                 continue
             words.append(word)
+        words.extend(self.granted)
+        if self.frozen:
+            words.append("冻结")
         return words
 
     def __str__(self) -> str:
@@ -328,10 +338,12 @@ class Game:
         self.weapons: List[Optional[CardDef]] = [None, None]
         self.weapon_durability: List[int] = [0, 0]
         self.hero_attacked: List[bool] = [False, False]
+        self.hero_frozen: List[bool] = [False, False]
         self.turns = 0
         self.finished = False
         self.winner: Optional[int] = None
         self._next_uid = 0
+        self._resolving_deaths = False      # 亡语递归保护，见 _clear_dead
 
         for player in range(N_PLAYERS):
             going_first = player == self.first
@@ -369,6 +381,7 @@ class Game:
         twin.weapons = list(self.weapons)
         twin.weapon_durability = list(self.weapon_durability)
         twin.hero_attacked = list(self.hero_attacked)
+        twin.hero_frozen = list(self.hero_frozen)
         return twin
 
     def observe(self, player: Optional[int] = None) -> Observation:
@@ -427,35 +440,19 @@ class Game:
         for i, card in enumerate(self.hands[player]):
             if card.cost > self.mana[player]:
                 continue
-            # 随从和武器
-            if not card.spell:
-                if card.name in seen:
-                    continue
-                if not card.weapon and board_full:
-                    continue  # 随从需要场地
-                seen.add(card.name)
-                moves.append(play(i))
-            # 伤害法术 / 变形术 / 横扫：需要指定目标（敌方随从 + 英雄），无视嘲讽和潜行，
-            # 但扰咒的随从不能被指定
-            elif card.spell_damage > 0 or card.spell_transform:
-                if card.name in seen:
-                    continue
-                seen.add(card.name)
+            if card.name in seen:
+                continue
+            if not card.spell and not card.weapon and board_full:
+                continue  # 随从需要场地
+            seen.add(card.name)
+            # 需要指定目标的（伤害法术、变形术、指向性战吼）：每个合法目标一个动作。
+            # 无视嘲讽和潜行，但扰咒的随从不能被指定。
+            if card.needs_target:
                 for j, minion in enumerate(enemy_board):
                     if self._targetable(minion):
                         moves.append(Action(PLAY, i, j))
                 moves.append(Action(PLAY, i, HERO))
-            # 抽牌 / 飞弹 / AoE / 乱斗 / 扭曲虚空：无需指定目标
-            elif card.spell_draw > 0 or card.spell_missiles > 0 or card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0 or card.spell_destroy_all or card.spell_brawl:
-                if card.name in seen:
-                    continue
-                seen.add(card.name)
-                moves.append(play(i))
-            # 幸运币等
             else:
-                if card.name in seen:
-                    continue
-                seen.add(card.name)
                 moves.append(play(i))
 
         # 攻击：潜行的随从不能被指定；有嘲讽挡着就只能打嘲讽
@@ -476,7 +473,8 @@ class Game:
 
         # 英雄武器攻击：一回合最多一次
         weapon = self.weapons[player]
-        if weapon is not None and weapon.attack > 0 and not self.hero_attacked[player]:
+        if (weapon is not None and weapon.attack > 0
+                and not self.hero_attacked[player] and not self.hero_frozen[player]):
             if face_open:
                 moves.append(hero_attack(HERO))
             for j in targets:
@@ -517,93 +515,168 @@ class Game:
         hand.pop(hand_index)
         self.mana[player] -= card.cost
         if card.spell:
-            self._cast(player, card, target)
+            if card.name == THE_COIN.name:
+                self.mana[player] += COIN_MANA
+                return
+            self._resolve(player, card.effect, target)
         elif card.weapon:
             self.weapons[player] = card
             self.weapon_durability[player] = card.durability
+            self._resolve(player, card.battlecry, target)
         else:
+            # 随从先落地再触发战吼——和炉石一致，战吼里的 AoE 会打到自己
             self.boards[player].append(Minion.summon(card, self._take_uid()))
+            self._resolve(player, card.battlecry, target)
 
-    def _cast(self, player: int, card: CardDef, target: int = HERO) -> None:
-        if card.name == THE_COIN.name:
-            self.mana[player] += COIN_MANA
+    def _resolve(self, player: int, effect, target: int = HERO) -> None:
+        """结算一段效果。**法术、战吼、亡语共用这一个入口。**
+
+        `player` 是效果的主人，`target` 只在需要指定目标的效果里有意义（下标指向
+        对方场上的随从，`HERO` 表示对方英雄）。
+        """
+        if effect is None:
             return
-        # 法术增强：每一处**伤害**都 +bonus。变形/消灭/乱斗/抽牌不受影响。
-        bonus = self.spell_power(player)
-        if card.spell_draw > 0:
-            for _ in range(card.spell_draw):
+
+        # 法术增强只加**伤害**：变形、消灭、乱斗、抽牌、召唤都不受影响
+        bonus = self.spell_power(player) if effect.deals_damage else 0
+        enemy = 1 - player
+
+        if effect.draw > 0:
+            for _ in range(effect.draw):
                 self._draw(player)
-        if card.spell_destroy_all:
+
+        if effect.summon and effect.summon_count > 0:
+            token = TOKENS[effect.summon]
+            for _ in range(effect.summon_count):
+                if len(self.boards[player]) >= BOARD_LIMIT:
+                    break
+                self.boards[player].append(Minion.summon(token, self._take_uid()))
+
+        if effect.destroy_all:
             self.boards[0] = []
             self.boards[1] = []
-        if card.spell_brawl:
-            all_minions = [(p, j, m) for p in range(N_PLAYERS)
-                           for j, m in enumerate(self.boards[p])]
+
+        if effect.brawl:
+            all_minions = [m for p in range(N_PLAYERS) for m in self.boards[p]]
             if all_minions:
                 survivor = self.rng.choice(all_minions)
                 for p in range(N_PLAYERS):
-                    self.boards[p] = [m for m in self.boards[p] if m.uid == survivor[2].uid]
-        if card.spell_transform:
-            enemy_board = self.boards[1 - player]
-            if 0 <= target < len(enemy_board):
-                if not self._targetable(enemy_board[target]):
-                    raise ValueError(f"{enemy_board[target].name} 带扰咒，不能被法术指定")
-                sheep = CardDef("绵羊", 1, 1, 1)
-                transformed = Minion.summon(sheep, self._take_uid())
-                transformed.just_played = enemy_board[target].just_played
-                transformed.attacks_left = enemy_board[target].attacks_left
-                enemy_board[target] = transformed
-        if card.spell_aoe_enemy_minions > 0:
-            dmg = card.spell_aoe_enemy_minions + bonus
-            for m in self.boards[1 - player]:
+                    self.boards[p] = [m for m in self.boards[p] if m.uid == survivor.uid]
+
+        # 冻结。放在伤害之前——寒冰箭那种"造成伤害并冻结"，被打死的随从就不用管了，
+        # `_clear_dead` 会把它清掉；但如果先打死再找目标就会索引错位。
+        if effect.freeze_enemy_minions:
+            for minion in self.boards[enemy]:
+                minion.frozen = True
+        if effect.freeze_target:
+            if target == HERO:
+                self.hero_frozen[enemy] = True
+            else:
+                board = self.boards[enemy]
+                if 0 <= target < len(board):
+                    self._require_targetable(board[target])
+                    board[target].frozen = True
+
+        if effect.transform or effect.destroy_target:
+            board = self.boards[enemy]
+            if 0 <= target < len(board):
+                self._require_targetable(board[target])
+                if effect.destroy_target:
+                    board[target].health = 0
+                else:
+                    sheep = Minion.summon(SHEEP, self._take_uid())
+                    sheep.just_played = board[target].just_played
+                    sheep.attacks_left = board[target].attacks_left
+                    board[target] = sheep
+
+        # --- 治疗与增益 ---
+        if effect.heal > 0 or effect.buff_attack or effect.buff_health or effect.grant:
+            for minion in self._buff_targets(player, effect, target):
+                if effect.heal > 0:
+                    minion.health = min(minion.health + effect.heal, minion.max_health)
+                if effect.buff_attack:
+                    minion.attack += effect.buff_attack
+                if effect.buff_health:
+                    minion.health += effect.buff_health
+                    minion.max_health += effect.buff_health
+                for word in effect.grant:
+                    minion.granted = minion.granted + (word,)
+                    if word == DIVINE_SHIELD:
+                        minion.divine_shield = True
+                    elif word == STEALTH:
+                        minion.stealth = True
+                    elif word == REBORN:
+                        minion.reborn = True
+
+        # --- 伤害 ---
+        if effect.aoe_enemy_minions > 0:
+            for m in list(self.boards[enemy]):
+                self._hit(m, effect.aoe_enemy_minions + bonus)
+
+        if effect.aoe_all_enemies > 0:
+            dmg = effect.aoe_all_enemies + bonus
+            for m in list(self.boards[enemy]):
                 self._hit(m, dmg)
-        if card.spell_aoe_all_enemies > 0:
-            dmg = card.spell_aoe_all_enemies + bonus
-            for m in self.boards[1 - player]:
-                self._hit(m, dmg)
-            if dmg > 0:
-                self._damage_hero(1 - player, dmg)
-        if card.spell_aoe_all > 0:
-            dmg = card.spell_aoe_all + bonus
+            self._damage_hero(enemy, dmg)
+
+        if effect.aoe_all > 0:
+            dmg = effect.aoe_all + bonus
             for p in range(N_PLAYERS):
-                for m in self.boards[p]:
+                for m in list(self.boards[p]):
                     self._hit(m, dmg)
             self._damage_hero(0, dmg)
             self._damage_hero(1, dmg)
-        if card.spell_damage > 0:
+
+        if effect.damage > 0:
             if target == HERO:
-                self._damage_hero(1 - player, card.spell_damage + bonus)
+                self._damage_hero(enemy, effect.damage + bonus)
             else:
-                enemy_board = self.boards[1 - player]
-                if not 0 <= target < len(enemy_board):
+                board = self.boards[enemy]
+                if not 0 <= target < len(board):
                     raise ValueError(f"对方场上没有第 {target} 个随从")
-                if not self._targetable(enemy_board[target]):
-                    raise ValueError(f"{enemy_board[target].name} 带扰咒，不能被法术指定")
-                self._hit(enemy_board[target], card.spell_damage + bonus)
-        if card.spell_splash > 0:
+                self._require_targetable(board[target])
+                self._hit(board[target], effect.damage + bonus)
+
+        if effect.splash > 0:
             # 溅射不是"指定目标"，扰咒挡不住
-            for j, m in enumerate(self.boards[1 - player]):
+            for j, m in enumerate(list(self.boards[enemy])):
                 if j != target:
-                    self._hit(m, card.spell_splash + bonus)
+                    self._hit(m, effect.splash + bonus)
             if target != HERO:
-                self._damage_hero(1 - player, card.spell_splash + bonus)
-        if card.spell_missiles > 0:
+                self._damage_hero(enemy, effect.splash + bonus)
+
+        if effect.missiles > 0:
             # 飞弹按炉石的规矩加数量而不是每颗的伤害，总伤害同样 +bonus
-            for _ in range(card.spell_missiles + bonus):
-                candidates: List[int] = []
-                for j in range(len(self.boards[1 - player])):
-                    candidates.append(j)
-                if self.hero_health[1 - player] > 0:
+            for _ in range(effect.missiles + bonus):
+                candidates: List[int] = list(range(len(self.boards[enemy])))
+                if self.hero_health[enemy] > 0:
                     candidates.append(HERO)
                 if not candidates:
                     break
                 t = self.rng.choice(candidates)
                 if t == HERO:
-                    self._damage_hero(1 - player, 1)
+                    self._damage_hero(enemy, 1)
                 else:
-                    self._hit(self.boards[1 - player][t], 1)
+                    self._hit(self.boards[enemy][t], 1)
+
         self._clear_dead()
         self._check_over()
+
+    def _require_targetable(self, minion: "Minion") -> None:
+        if not self._targetable(minion):
+            raise ValueError(f"{minion.name} 带扰咒，不能被法术指定")
+
+    def _buff_targets(self, player: int, effect, target: int) -> List["Minion"]:
+        """治疗/增益作用到哪些随从上。"""
+        if effect.scope == "friendly":
+            return list(self.boards[player])
+        if effect.scope == "friendly_others":
+            # 战吼里"其他友方随从"——自己刚落地，排掉最后一个
+            return list(self.boards[player][:-1])
+        board = self.boards[player if effect.scope == "self" else 1 - player]
+        if 0 <= target < len(board):
+            return [board[target]]
+        return []
 
     def _attack(self, attacker_index: int, target_index: int) -> None:
         player = self.current
@@ -666,6 +739,8 @@ class Game:
             raise ValueError("没有装备武器")
         if self.hero_attacked[player]:
             raise ValueError("英雄这回合已经攻击过了")
+        if self.hero_frozen[player]:
+            raise ValueError("英雄被冻结了，不能攻击")
 
         enemy_board = self.boards[1 - player]
         if target_index == HERO:
@@ -695,7 +770,19 @@ class Game:
         self.hero_attacked[player] = True
         self._check_over()
 
+    def _thaw(self, player: int) -> None:
+        """解冻 `player` 的所有角色。
+
+        在**自己回合结束时**解冻，所以被冻结的一方会实打实地错过一整个回合：
+        对手回合冻住 → 自己这回合动不了 → 回合结束才化开 → 下回合才能动。
+        自己在自己回合冻自己的角色也是同样规则，当回合结束就化开。
+        """
+        self.hero_frozen[player] = False
+        for minion in self.boards[player]:
+            minion.frozen = False
+
     def _end_turn(self) -> None:
+        self._thaw(self.current)
         self.turns += 1
         if self.turns >= self.max_turns:        # 兜底，正常打不到
             self._finish_by_health()
@@ -764,6 +851,7 @@ class Game:
         复生有场地限制：如果死亡时棋盘是满的，复生不会触发（没有空间）。
         这和炉石一致——死亡结算时，死掉的随从还没有真正离开棋盘。
         """
+        dying: List[Tuple[int, Minion]] = []
         for player in range(N_PLAYERS):
             board = self.boards[player]
             n_before = len(board)
@@ -771,12 +859,27 @@ class Game:
             for minion in board:
                 if minion.health > 0:
                     survivors.append(minion)
-                elif minion.reborn and n_before < BOARD_LIMIT and len(survivors) < BOARD_LIMIT:
+                    continue
+                if minion.card.deathrattle is not None:
+                    dying.append((player, minion))
+                if minion.reborn and n_before < BOARD_LIMIT and len(survivors) < BOARD_LIMIT:
                     back = Minion.summon(minion.card, self._take_uid())
                     back.health = 1
                     back.reborn = False
                     survivors.append(back)
             self.boards[player] = survivors
+
+        # 亡语在随从离开棋盘之后才结算——这样召唤类亡语才有位置放。
+        # 亡语本身可能再打死随从，`_resolve` 结尾会再调一次 `_clear_dead`，
+        # `_resolving_deaths` 防止无限递归。
+        if dying and not self._resolving_deaths:
+            self._resolving_deaths = True
+            try:
+                for owner, minion in dying:
+                    self._resolve(owner, minion.card.deathrattle)
+            finally:
+                self._resolving_deaths = False
+            self._clear_dead()
 
     def _check_over(self) -> None:
         dead = [p for p in range(N_PLAYERS) if self.hero_health[p] <= 0]
@@ -853,7 +956,7 @@ def describe(obs: Observation, action: Action) -> str:
         return "结束回合"
     if action.kind == PLAY:
         card = obs.hand[action.source]
-        if card.spell and (card.spell_damage > 0 or card.spell_transform):
+        if card.needs_target:
             who = "英雄" if action.target == HERO else f"随从#{action.target}"
             return f"{card.name} → {who}"
         return f"{'用' if card.spell else '出'} {card}"
