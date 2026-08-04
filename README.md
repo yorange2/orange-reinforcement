@@ -16,7 +16,7 @@
 ## 环境
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv                       # 开发用 3.12，别用系统默认的 python3
 .venv/bin/pip install -r requirements.txt      # torch + numpy
 ```
 
