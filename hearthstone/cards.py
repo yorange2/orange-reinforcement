@@ -49,6 +49,27 @@ KEYWORD_INDEX: Dict[str, int] = {word: i for i, word in enumerate(KEYWORDS)}
 INERT_KEYWORDS: Tuple[str, ...] = ()
 
 
+# ---------------------------------------------------------------- 条件
+
+#: 条件类型。
+COND_HAND_EMPTY = "hand_empty"          # 你没有其他手牌
+COND_HAS_WEAPON = "has_weapon"          # 你装备着武器
+COND_TARGET_DIED = "target_died"        # 指定的目标死了
+COND_TARGET_ALIVE = "target_alive"      # 指定的目标还活着
+COND_HERO_HP_AT_MOST = "hero_hp_at_most"    # 自己生命值 ≤ value
+
+
+class Condition(NamedTuple):
+    """一个可判定的条件。
+
+    `COND_TARGET_*` 只有在**本体结算之后**求值才有意义（"对一个随从造成 1 点伤害，
+    如果该随从死亡，抽一张牌"），所以这类条件要挂在 `Effect.then` 上，见 `_resolve`。
+    """
+
+    kind: str
+    value: int = 0
+
+
 class Effect(NamedTuple):
     """一段可结算的效果。**法术、战吼、亡语共用同一套结算**。
 
@@ -88,6 +109,14 @@ class Effect(NamedTuple):
     destroy_target: bool = False
     destroy_all: bool = False
     brawl: bool = False             # 随机只留一个随从
+
+    # --- 条件 ---
+    #: 前置条件，不满足就整个不结算；配合 `otherwise` 表达"如果…则**改为**…"
+    condition: Optional[Condition] = None
+    otherwise: Optional["Effect"] = None
+    #: 本体结算**之后**再结算的一段。"如果该随从死亡"这类条件只能挂在这里，
+    #: 因为它要等伤害打完才有答案。
+    then: Optional["Effect"] = None
 
     @property
     def needs_target(self) -> bool:
@@ -407,6 +436,19 @@ POOL: List[CardDef] = [
         Trigger(ON_TURN_START, Effect(destroy_all=True))),
     _mt("狂野炎术师", 2, 3, 2,
         Trigger(ON_CAST_SPELL, Effect(aoe_all=1))),
+    # ---- 条件
+    _spell("死亡缠绕", 1, damage=1,
+           then=Effect(condition=Condition(COND_TARGET_DIED), draw=1)),
+    _spell("猛击", 2, damage=2,
+           then=Effect(condition=Condition(COND_TARGET_ALIVE), draw=1)),
+    _spell("快速射击", 2, damage=3,
+           then=Effect(condition=Condition(COND_HAND_EMPTY), draw=1)),
+    # "造成 4 点伤害；如果你的生命值 ≤12，则**改为**造成 6 点" —— 条件成立走本体，
+    # 否则走 otherwise，所以本体是 6 点那一支。
+    _spell("致死打击", 3, damage=6,
+           condition=Condition(COND_HERO_HP_AT_MOST, 12),
+           otherwise=Effect(damage=4)),
+    _mb("雾帆劫掠者", 2, 2, 2, condition=Condition(COND_HAS_WEAPON), damage=2),
 ]
 
 #: 卡名 -> 卡池下标。

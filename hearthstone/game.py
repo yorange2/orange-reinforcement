@@ -47,6 +47,11 @@ from .cards import (
     THE_COIN,
     TOKENS,
     WINDFURY,
+    COND_HAND_EMPTY,
+    COND_HAS_WEAPON,
+    COND_HERO_HP_AT_MOST,
+    COND_TARGET_ALIVE,
+    COND_TARGET_DIED,
     ON_CAST_SPELL,
     ON_DEAL_DAMAGE,
     ON_MINION_DEATH,
@@ -584,9 +589,19 @@ class Game:
         if effect is None:
             return
 
+        enemy = 1 - player
+        # 记下结算**之前**的目标是谁。"如果该随从死亡"要等伤害打完才能判，
+        # 那时候它可能已经被清出棋盘了，只能靠这个引用回头看。
+        victim: Optional[Minion] = None
+        if 0 <= target < len(self.boards[enemy]):
+            victim = self.boards[enemy][target]
+
+        if effect.condition is not None and not self._check(effect.condition, player, victim):
+            self._resolve(player, effect.otherwise, target)
+            return
+
         # 法术增强只加**伤害**：变形、消灭、乱斗、抽牌、召唤都不受影响
         bonus = self.spell_power(player) if effect.deals_damage else 0
-        enemy = 1 - player
 
         if effect.draw > 0:
             for _ in range(effect.draw):
@@ -708,6 +723,30 @@ class Game:
 
         self._clear_dead()
         self._check_over()
+
+        # 后续段落：条件在这里才求值，"如果该随从死亡"这时候才有答案
+        if effect.then is not None:
+            if (effect.then.condition is None
+                    or self._check(effect.then.condition, player, victim)):
+                self._resolve(player, effect.then._replace(condition=None), target)
+
+    def _check(self, cond, player: int, victim: Optional["Minion"]) -> bool:
+        """判定一个条件。`victim` 是本次效果指定的目标（结算前抓的引用）。"""
+        if cond.kind == COND_HAND_EMPTY:
+            return not self.hands[player]
+        if cond.kind == COND_HAS_WEAPON:
+            return self.weapons[player] is not None and self.weapon_durability[player] > 0
+        if cond.kind == COND_HERO_HP_AT_MOST:
+            return self.hero_health[player] <= cond.value
+        if cond.kind in (COND_TARGET_DIED, COND_TARGET_ALIVE):
+            if victim is None:
+                return False
+            # 已经被清出棋盘，或者血量归零还没清，都算死了
+            gone = victim.dead or all(
+                m is not victim for board in self.boards for m in board
+            )
+            return gone if cond.kind == COND_TARGET_DIED else not gone
+        raise ValueError(f"未知的条件类型 {cond.kind!r}")
 
     def _require_targetable(self, minion: "Minion") -> None:
         if not self._targetable(minion):
