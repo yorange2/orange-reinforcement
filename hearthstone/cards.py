@@ -15,9 +15,8 @@
     扰咒  不能成为法术和英雄技能的目标
     法术增强  自己的法术伤害 +1
 
-最后两个在当前版本里**不产生任何效果**——这版没有法术（除了幸运币）也没有英雄技能，
-"不能被指向"和"法术伤害 +1"都无从触发。卡还是照原样收进来了，关键词会显示、也会进
-特征向量，等以后加了法术就直接生效。
+十个关键词全部生效。扰咒挡的是**指定目标**——AoE、溅射和奥术飞弹的随机伤害照样
+打得到它；法术增强只加**伤害**，变形、消灭、乱斗、抽牌都不受影响。
 """
 
 from __future__ import annotations
@@ -46,8 +45,8 @@ KEYWORDS: Tuple[str, ...] = (
 )
 KEYWORD_INDEX: Dict[str, int] = {word: i for i, word in enumerate(KEYWORDS)}
 
-#: 这两个在当前版本里没有效果，原因见模块文档。
-INERT_KEYWORDS: Tuple[str, ...] = (ELUSIVE, SPELL_DAMAGE)
+#: 曾经有两个关键词没实现，现在全部生效了。留空元组是为了不破坏外部引用。
+INERT_KEYWORDS: Tuple[str, ...] = ()
 
 
 class CardDef(NamedTuple):
@@ -231,7 +230,7 @@ POOL: List[CardDef] = [
     # ---- 复生
     _m("骸骨怨灵", 4, 2, 5, TAUNT, REBORN),
     _m("荒野刺客", 5, 4, 2, STEALTH, REBORN),
-    # ---- 扰咒 / 法术增强（当前版本里没有效果）
+    # ---- 扰咒 / 法术增强
     _m("精灵龙", 2, 3, 2, ELUSIVE),
     _m("狗头人地卜师", 2, 2, 2, SPELL_DAMAGE),
     _m("达拉然法师", 3, 1, 4, SPELL_DAMAGE),

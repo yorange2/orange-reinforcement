@@ -32,10 +32,12 @@ from typing import List, NamedTuple, Optional, Sequence
 from .cards import (
     CHARGE,
     DIVINE_SHIELD,
+    ELUSIVE,
     LIFESTEAL,
     POISONOUS,
     REBORN,
     RUSH,
+    SPELL_DAMAGE,
     STEALTH,
     TAUNT,
     THE_COIN,
@@ -399,6 +401,20 @@ class Game:
             enemy_hand=list(self.hands[enemy]),      # 先知字段，见 Observation 的说明
         )
 
+    def spell_power(self, player: int) -> int:
+        """法术增强：自己场上每有一个带这个关键词的随从，法术伤害 +1。
+
+        只加**伤害**——变形、消灭、乱斗、抽牌都不受影响。奥术飞弹按炉石的规矩加的是
+        飞弹数量而不是每颗的伤害（总伤害同样 +1）。
+        """
+        return sum(1 for m in self.boards[player] if m.has(SPELL_DAMAGE))
+
+    @staticmethod
+    def _targetable(minion: "Minion") -> bool:
+        """能不能被法术指定。扰咒的随从不行——但 AoE、溅射和随机伤害照样打得到，
+        因为那些都不算"指定目标"。"""
+        return not minion.has(ELUSIVE)
+
     def legal_actions(self, player: Optional[int] = None) -> List[Action]:
         """当前玩家的合法动作。结束回合永远可选，所以这个列表不会是空的。"""
         player = self.current if player is None else player
@@ -419,13 +435,15 @@ class Game:
                     continue  # 随从需要场地
                 seen.add(card.name)
                 moves.append(play(i))
-            # 伤害法术 / 变形术 / 横扫：需要指定目标（敌方随从 + 英雄），无视嘲讽和潜行
+            # 伤害法术 / 变形术 / 横扫：需要指定目标（敌方随从 + 英雄），无视嘲讽和潜行，
+            # 但扰咒的随从不能被指定
             elif card.spell_damage > 0 or card.spell_transform:
                 if card.name in seen:
                     continue
                 seen.add(card.name)
-                for j in range(len(enemy_board)):
-                    moves.append(Action(PLAY, i, j))
+                for j, minion in enumerate(enemy_board):
+                    if self._targetable(minion):
+                        moves.append(Action(PLAY, i, j))
                 moves.append(Action(PLAY, i, HERO))
             # 抽牌 / 飞弹 / AoE / 乱斗 / 扭曲虚空：无需指定目标
             elif card.spell_draw > 0 or card.spell_missiles > 0 or card.spell_aoe_enemy_minions > 0 or card.spell_aoe_all_enemies > 0 or card.spell_aoe_all > 0 or card.spell_destroy_all or card.spell_brawl:
@@ -510,6 +528,8 @@ class Game:
         if card.name == THE_COIN.name:
             self.mana[player] += COIN_MANA
             return
+        # 法术增强：每一处**伤害**都 +bonus。变形/消灭/乱斗/抽牌不受影响。
+        bonus = self.spell_power(player)
         if card.spell_draw > 0:
             for _ in range(card.spell_draw):
                 self._draw(player)
@@ -526,23 +546,25 @@ class Game:
         if card.spell_transform:
             enemy_board = self.boards[1 - player]
             if 0 <= target < len(enemy_board):
+                if not self._targetable(enemy_board[target]):
+                    raise ValueError(f"{enemy_board[target].name} 带扰咒，不能被法术指定")
                 sheep = CardDef("绵羊", 1, 1, 1)
                 transformed = Minion.summon(sheep, self._take_uid())
                 transformed.just_played = enemy_board[target].just_played
                 transformed.attacks_left = enemy_board[target].attacks_left
                 enemy_board[target] = transformed
         if card.spell_aoe_enemy_minions > 0:
-            dmg = card.spell_aoe_enemy_minions
+            dmg = card.spell_aoe_enemy_minions + bonus
             for m in self.boards[1 - player]:
                 self._hit(m, dmg)
         if card.spell_aoe_all_enemies > 0:
-            dmg = card.spell_aoe_all_enemies
+            dmg = card.spell_aoe_all_enemies + bonus
             for m in self.boards[1 - player]:
                 self._hit(m, dmg)
             if dmg > 0:
                 self._damage_hero(1 - player, dmg)
         if card.spell_aoe_all > 0:
-            dmg = card.spell_aoe_all
+            dmg = card.spell_aoe_all + bonus
             for p in range(N_PLAYERS):
                 for m in self.boards[p]:
                     self._hit(m, dmg)
@@ -550,20 +572,24 @@ class Game:
             self._damage_hero(1, dmg)
         if card.spell_damage > 0:
             if target == HERO:
-                self._damage_hero(1 - player, card.spell_damage)
+                self._damage_hero(1 - player, card.spell_damage + bonus)
             else:
                 enemy_board = self.boards[1 - player]
                 if not 0 <= target < len(enemy_board):
                     raise ValueError(f"对方场上没有第 {target} 个随从")
-                self._hit(enemy_board[target], card.spell_damage)
+                if not self._targetable(enemy_board[target]):
+                    raise ValueError(f"{enemy_board[target].name} 带扰咒，不能被法术指定")
+                self._hit(enemy_board[target], card.spell_damage + bonus)
         if card.spell_splash > 0:
+            # 溅射不是"指定目标"，扰咒挡不住
             for j, m in enumerate(self.boards[1 - player]):
                 if j != target:
-                    self._hit(m, card.spell_splash)
+                    self._hit(m, card.spell_splash + bonus)
             if target != HERO:
-                self._damage_hero(1 - player, card.spell_splash)
+                self._damage_hero(1 - player, card.spell_splash + bonus)
         if card.spell_missiles > 0:
-            for _ in range(card.spell_missiles):
+            # 飞弹按炉石的规矩加数量而不是每颗的伤害，总伤害同样 +bonus
+            for _ in range(card.spell_missiles + bonus):
                 candidates: List[int] = []
                 for j in range(len(self.boards[1 - player])):
                     candidates.append(j)
