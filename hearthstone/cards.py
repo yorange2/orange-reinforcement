@@ -126,6 +126,39 @@ class Aura(NamedTuple):
     only_keyword: str = ""
 
 
+# ---------------------------------------------------------------- 触发
+
+#: 触发事件。
+ON_TURN_START = "turn_start"
+ON_TURN_END = "turn_end"
+ON_TAKE_DAMAGE = "take_damage"     # 有角色受到伤害
+ON_DEAL_DAMAGE = "deal_damage"     # 本随从造成了伤害（水元素、帝王眼镜蛇）
+ON_CAST_SPELL = "cast_spell"       # 有人施放法术
+ON_MINION_DEATH = "minion_death"
+
+#: 谁身上发生的事件才算数。和事件类型是**正交**的两个轴——"受到伤害"要区分是
+#: 本随从受伤（苦痛侍僧）还是任意随从受伤（暴乱狂战士）。
+SRC_SELF = "self"
+SRC_FRIENDLY_MINIONS = "friendly_minions"
+SRC_ENEMY_MINIONS = "enemy_minions"
+SRC_ALL_MINIONS = "all_minions"
+
+
+class Trigger(NamedTuple):
+    """随从在场期间监听某类事件，事件发生就结算一段 `Effect`。
+
+    `subject_as_target` 为真时，效果作用在**事件的承受者**身上而不是某个指定目标
+    ——水元素"冻结任何受到本随从伤害的角色"就是这种。
+    """
+
+    event: str
+    effect: Effect
+    source: str = SRC_SELF
+    #: 回合类事件是不是只在自己回合触发。"在你的回合开始时" vs "在每个回合开始时"
+    my_turn_only: bool = True
+    subject_as_target: bool = False
+
+
 class CardDef(NamedTuple):
     """一张卡。`spell` 为真时是法术，`weapon` 为真时是武器。
 
@@ -147,6 +180,7 @@ class CardDef(NamedTuple):
     battlecry: Optional[Effect] = None
     deathrattle: Optional[Effect] = None
     aura: Optional[Aura] = None
+    trigger: Optional[Trigger] = None
 
     @property
     def fx(self) -> "Effect":
@@ -242,6 +276,12 @@ def _md(name: str, cost: int, attack: int, health: int, *keywords: str,
     """带亡语的随从。"""
     return CardDef(name, cost, attack, health, tuple(keywords),
                    deathrattle=Effect(**deathrattle))
+
+
+def _mt(name: str, cost: int, attack: int, health: int, trigger: Trigger,
+        *keywords: str) -> CardDef:
+    """带触发的随从。"""
+    return CardDef(name, cost, attack, health, tuple(keywords), trigger=trigger)
 
 
 def _ma(name: str, cost: int, attack: int, health: int, aura: Aura,
@@ -351,6 +391,22 @@ POOL: List[CardDef] = [
     _ma("石堡卫士", 4, 3, 4, Aura(health=1)),
     _ma("暴风城勇士", 7, 6, 6, Aura(attack=1, health=1)),
     _ma("炎锤先锋", 4, 3, 3, Aura(attack=1, scope=AURA_ADJACENT)),
+    # ---- 触发
+    _mt("苦痛侍僧", 3, 1, 3,
+        Trigger(ON_TAKE_DAMAGE, Effect(draw=1), source=SRC_SELF)),
+    _mt("暴乱狂战士", 3, 2, 4,
+        Trigger(ON_TAKE_DAMAGE, Effect(buff_attack=1, scope="self"),
+                source=SRC_ALL_MINIONS)),
+    _mt("水元素", 4, 3, 6,
+        Trigger(ON_DEAL_DAMAGE, Effect(freeze_target=True), source=SRC_SELF,
+                subject_as_target=True)),
+    _mt("帝王眼镜蛇", 5, 2, 3,
+        Trigger(ON_DEAL_DAMAGE, Effect(destroy_target=True), source=SRC_SELF,
+                subject_as_target=True)),
+    _mt("末日预言者", 2, 2, 7,
+        Trigger(ON_TURN_START, Effect(destroy_all=True))),
+    _mt("狂野炎术师", 2, 3, 2,
+        Trigger(ON_CAST_SPELL, Effect(aoe_all=1))),
 ]
 
 #: 卡名 -> 卡池下标。

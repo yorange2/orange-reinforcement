@@ -47,6 +47,16 @@ from .cards import (
     THE_COIN,
     TOKENS,
     WINDFURY,
+    ON_CAST_SPELL,
+    ON_DEAL_DAMAGE,
+    ON_MINION_DEATH,
+    ON_TAKE_DAMAGE,
+    ON_TURN_END,
+    ON_TURN_START,
+    SRC_ALL_MINIONS,
+    SRC_ENEMY_MINIONS,
+    SRC_FRIENDLY_MINIONS,
+    SRC_SELF,
     CardDef,
     build_decklist,
     hand_to_str,
@@ -71,6 +81,9 @@ HERO = -1
 HERO_SOURCE = -2
 
 N_PLAYERS = 2
+
+#: 触发链的最大深度。两张互相触发的卡会无限套娃，这里兜底。
+_MAX_TRIGGER_DEPTH = 8
 
 # 动作类型
 PLAY = "play"
@@ -373,6 +386,7 @@ class Game:
         self.winner: Optional[int] = None
         self._next_uid = 0
         self._resolving_deaths = False      # 亡语递归保护，见 _clear_dead
+        self._trigger_depth = 0             # 触发链深度，见 _fire
 
         for player in range(N_PLAYERS):
             going_first = player == self.first
@@ -411,6 +425,8 @@ class Game:
         twin.weapon_durability = list(self.weapon_durability)
         twin.hero_attacked = list(self.hero_attacked)
         twin.hero_frozen = list(self.hero_frozen)
+        twin._trigger_depth = 0
+        twin._resolving_deaths = False
         return twin
 
     def observe(self, player: Optional[int] = None) -> Observation:
@@ -548,6 +564,7 @@ class Game:
                 self.mana[player] += COIN_MANA
                 return
             self._resolve(player, card.effect, target)
+            self._fire(ON_CAST_SPELL, by_player=player)
         elif card.weapon:
             self.weapons[player] = card
             self.weapon_durability[player] = card.durability
@@ -758,6 +775,14 @@ class Game:
 
             self._drain(player, attacker, dealt_out)
             self._drain(1 - player, defender, dealt_in)
+
+            # "本随从造成伤害"的触发（水元素冻结、帝王眼镜蛇消灭）。放在清场之前，
+            # 这样被冻结/消灭的效果和这次战斗的死亡一起结算。
+            if dealt_out:
+                self._fire(ON_DEAL_DAMAGE, actor=attacker, subject=defender)
+            if dealt_in:
+                self._fire(ON_DEAL_DAMAGE, actor=defender, subject=attacker)
+
             self._clear_dead()
 
         self._check_over()
@@ -799,6 +824,113 @@ class Game:
             self.weapons[player] = None
         self.hero_attacked[player] = True
         self._check_over()
+
+    def _fire(self, event: str, actor: Optional["Minion"] = None,
+              subject: Optional["Minion"] = None,
+              by_player: Optional[int] = None) -> None:
+        """派发一个事件给场上所有监听它的随从。
+
+        Args:
+            event:   事件类型，见 cards.py 的 ON_* 常量
+            actor:     事件的**发起者**（造成伤害的那个随从）
+            subject:   事件的**承受者**（受到伤害/死亡的那个）
+            by_player: 玩家级事件（施放法术）是哪个玩家干的
+
+        三条必须守住的规则：
+
+        1. **顺序按上场先后**——和炉石一致，先出的先触发。这里就是棋盘顺序。
+        2. **先快照再触发**——触发过程中随从会死、会新增，边遍历边改会漏掉或重复。
+        3. **限制触发链深度**——触发的效果可能再触发别的（受伤 → 抽牌 → …）。
+           超过 `_MAX_TRIGGER_DEPTH` 就停下，避免两张卡互相触发时死循环。
+        """
+        if self._trigger_depth >= _MAX_TRIGGER_DEPTH:
+            return
+
+        listeners: List[Tuple[int, Minion]] = []
+        for player in range(N_PLAYERS):
+            for minion in self.boards[player]:
+                trig = minion.card.trigger
+                if trig is None or trig.event != event:
+                    continue
+                if not self._trigger_matches(trig, player, minion, actor,
+                                             subject, by_player):
+                    continue
+                listeners.append((player, minion))
+
+        if not listeners:
+            return
+
+        self._trigger_depth += 1
+        try:
+            for owner, minion in listeners:
+                # 只跳过**已经离场**的：被前一个触发打死并清掉的那些。
+                # 血量归零但还没清场的照样触发——炉石里伤害是同时结算的，水元素
+                # 撞死在大随从身上，照样把对方冻住。
+                # 必须按身份比而不是 ==，Minion 是 dataclass，两个同名同状态的会判等。
+                if all(m is not minion for m in self.boards[owner]):
+                    continue
+                trig = minion.card.trigger
+                if trig.subject_as_target and subject is not None:
+                    # 作用在事件的承受者身上（水元素冻结刚被它打到的那个）
+                    self._apply_to(owner, trig.effect, subject)
+                elif trig.effect.scope == "self":
+                    # 作用在监听者自己身上（暴乱狂战士"便获得+1攻击力"）
+                    self._apply_to(owner, trig.effect, minion)
+                else:
+                    self._resolve(owner, trig.effect)
+        finally:
+            self._trigger_depth -= 1
+
+    def _trigger_matches(self, trig, owner: int, listener: "Minion",
+                         actor: Optional["Minion"],
+                         subject: Optional["Minion"],
+                         by_player: Optional[int] = None) -> bool:
+        """这个随从关不关心这次事件。
+
+        分两类：**玩家级事件**（回合开始/结束、施放法术）没有随从当主角，只看是
+        不是"自己人"干的，`source` 那一轴不适用；**随从级事件**（受伤、造成伤害）
+        才按 `source` 判断是谁身上发生的。
+        """
+        if trig.event in (ON_TURN_START, ON_TURN_END):
+            return not trig.my_turn_only or self.current == owner
+        if trig.event == ON_CAST_SPELL:
+            return not trig.my_turn_only or by_player == owner
+
+        who = actor if trig.event == ON_DEAL_DAMAGE else subject
+        if trig.source == SRC_SELF:
+            return who is listener
+        if who is None:
+            return False
+        side = None
+        for p in range(N_PLAYERS):
+            if any(m is who for m in self.boards[p]):   # 按身份比，Minion 会值相等
+                side = p
+                break
+        if trig.source == SRC_ALL_MINIONS:
+            return side is not None
+        if trig.source == SRC_FRIENDLY_MINIONS:
+            return side == owner
+        if trig.source == SRC_ENEMY_MINIONS:
+            return side is not None and side != owner
+        return False
+
+    def _apply_to(self, owner: int, effect, victim: "Minion") -> None:
+        """把效果直接作用在某个随从身上，不走"指定目标"那套下标寻址。
+
+        触发器专用：水元素冻结的是"刚被它打到的那个"，不是玩家选的目标。
+        """
+        if effect.freeze_target:
+            victim.frozen = True
+        if effect.destroy_target:
+            victim.to_be_destroyed = True
+        if effect.damage:
+            self._hit(victim, effect.damage + self.spell_power(owner))
+        if effect.buff_attack or effect.buff_health:
+            victim.buff_attack += effect.buff_attack
+            victim.buff_health += effect.buff_health
+        if effect.heal:
+            victim.damage = max(0, victim.damage - effect.heal)
+        self._clear_dead()
 
     def _refresh_auras(self) -> None:
         """整体重算所有光环加成。
@@ -850,6 +982,7 @@ class Game:
             minion.frozen = False
 
     def _end_turn(self) -> None:
+        self._fire(ON_TURN_END)
         self._thaw(self.current)
         self.turns += 1
         if self.turns >= self.max_turns:        # 兜底，正常打不到
@@ -867,6 +1000,7 @@ class Game:
             minion.just_played = False          # 召唤失调解除
             minion.attacks_left = Minion.max_attacks(minion.card)
         self._draw(player)
+        self._fire(ON_TURN_START)
         self._check_over()
 
     # ------------------------------------------------------------------ 结算
@@ -887,6 +1021,8 @@ class Game:
             minion.divine_shield = False
             return 0
         minion.damage += amount
+        # 所有伤害都走这一个出口，触发也就只需要挂在这里
+        self._fire(ON_TAKE_DAMAGE, subject=minion)
         return amount
 
     def _drain(self, player: int, source, dealt: int) -> None:
