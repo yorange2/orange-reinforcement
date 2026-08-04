@@ -319,7 +319,7 @@ Action("end")                                  # 结束回合
 
 ```bash
 .venv/bin/python -m hearthstone.bench --model hearthstone/models/agent.pt --search
-.venv/bin/python -m hearthstone.bench --model ... --search --beam 24
+.venv/bin/python -m hearthstone.bench --model ... --search --beam 24   # 调宽度
 ```
 
 4 seed × 600 局，同一份权重上对比：
@@ -332,7 +332,7 @@ Action("end")                                  # 结束回合
 | 搜索 beam=24 | 72.08% ±1.05 | 81.38% ±1.16 | 48.3 ms/局 |
 
 **+14.4pp（t=9.2）**，是目前所有改动里效应最大的一个。beam 从 8 加到 24 没有再涨
-（差异在噪声内），所以默认 8 就够——中位回合本来就只有几百条序列，beam 只在双方满场
+（差异在噪声内）却要两倍时间，所以默认就是 8——中位回合本来就只有几百条序列，beam 只在双方满场
 的后期回合才真的起截断作用。
 
 ### 为什么是回合而不是 MCTS
