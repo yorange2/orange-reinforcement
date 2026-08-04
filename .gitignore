@@ -30,3 +30,6 @@ paodekuai/tools/parity_cases.json
 rosetta/rosetta_env*.so
 rosetta/native/build/
 
+# RosettaStone 训练产物
+rosetta/models/*.pt
+

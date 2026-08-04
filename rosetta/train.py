@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import random
 import time
 from typing import List, Optional, Tuple
@@ -33,6 +34,16 @@ from .policy import (
     make_batch,
     save_agent,
 )
+
+DECK_NAMES = list(decks.DECKS.keys()) + ["random_core"]
+
+
+def _make_deck(deck_name: str, rng: random.Random) -> list[str]:
+    """根据套牌名生成一副 30 张的套牌。random_core 每局不同。"""
+    if deck_name == "random_core":
+        return decks.random_core(rng)
+    ids = decks.DECKS.get(deck_name, decks.VANILLA_IDS)
+    return decks.build_deck(ids)
 
 OPPONENT_MIX = ["random", "greedy", "rule"]
 
@@ -59,9 +70,9 @@ def final_reward(winner: int, seat: int, obs) -> float:
 
 def play_episode(agent, opponent_name: str, rng: random.Random,
                  episode: int, hero_class: str = "MAGE",
-                 max_steps: int = 5000):
+                 max_steps: int = 5000, deck_name: str = "vanilla"):
     """打一局并收集轨迹。返回 (steps_collected, reward)。"""
-    dk = decks.vanilla()
+    dk = _make_deck(deck_name, rng)
     seed = rng.randrange(1 << 30)
 
     env = Env(player1_class=hero_class, player2_class=hero_class,
@@ -94,6 +105,11 @@ def play_episode(agent, opponent_name: str, rng: random.Random,
 
 
 def train(args: argparse.Namespace) -> PolicyAgent:
+    # 部分 RosettaStone 卡牌实现有内存 bug，会污染 pybind11 的类型注册表，
+    # 导致 Python GC 回收 pybind11 对象时崩溃（"pybind11_object_dealloc():
+    # Tried to deallocate unregistered instance!"）。禁用 GC 绕过这个问题。
+    gc.disable()
+
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     device = torch.device(args.device)
@@ -118,7 +134,8 @@ def train(args: argparse.Namespace) -> PolicyAgent:
     for episode in range(1, args.episodes + 1):
         n_steps, reward = play_episode(
             agent, args.opponent, rng, episode,
-            hero_class=args.hero, max_steps=args.max_steps)
+            hero_class=args.hero, max_steps=args.max_steps,
+            deck_name=args.deck)
         recent_wins.append(int(reward > 0))
 
         if n_steps:
@@ -137,6 +154,7 @@ def train(args: argparse.Namespace) -> PolicyAgent:
             print(f"第 {episode:>6} 局  近 {len(window)} 局胜率 {wr:5.1f}%"
                   f"  用时 {elapsed:5.1f}s  ({rate:5.1f} 局/秒)")
 
+    gc.enable()
     return agent
 
 
@@ -186,9 +204,11 @@ def _update(optimizer, net, steps, episodes, args, device) -> None:
 
 
 def evaluate(agent: PolicyAgent, opponent_name: str, games: int = 200,
-             seed: int = 0, hero_class: str = "MAGE") -> dict:
+             seed: int = 0, hero_class: str = "MAGE",
+             deck_name: str = "vanilla") -> dict:
     """评测 agent 打一个对手的胜率。先后手轮换。"""
-    dk = decks.vanilla()
+    eval_rng = random.Random(seed)
+    dk = _make_deck(deck_name, eval_rng)
     wins = 0
     draws = 0
     total_steps = 0
@@ -239,6 +259,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--opponent", default="rule",
                         choices=["random", "greedy", "rule", "mix"])
     parser.add_argument("--hero", default="MAGE", help="双方英雄职业")
+    parser.add_argument("--deck", default="vanilla",
+                        choices=DECK_NAMES + ["random_core"],
+                        help=f"套牌选择")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.5)
@@ -262,7 +285,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
-    print(f"算法: {args.algo}   对手: {args.opponent}"
+    print(f"算法: {args.algo}   对手: {args.opponent}   套牌: {args.deck}"
           f"   局数: {args.episodes}   设备: {args.device}")
     print("双人游戏，先后手轮换，随机基准 50%\n")
 
@@ -271,16 +294,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("\n最终评测")
     for opp in ["random", "greedy", "rule"]:
         r = evaluate(agent.eval_agent(), opp, games=400, seed=99999,
-                     hero_class=args.hero)
+                     hero_class=args.hero, deck_name=args.deck)
         print(f"  vs {opp:<7} {r['win_rate']*100:5.1f}%"
               f"  平局 {r['draw_rate']*100:4.1f}%"
               f"  {400/r.get('games',400)*r.get('games',400):.0f} 局")
 
     print("\n规则对手参照")
+    # random_core 每局卡组不同，不适合做固定参照，回退到 vanilla
+    ref_deck = decks.build_deck(decks.DECKS.get(args.deck, decks.VANILLA_IDS))
     for a_name, b_name in [("greedy", "rule"), ("rule", "greedy"),
                             ("rule", "rule"), ("random", "rule")]:
         r = arena_duel(BOTS[a_name], BOTS[b_name], episodes=200,
-                       hero_class=args.hero, seed=99999)
+                       hero_class=args.hero, seed=99999, deck=ref_deck)
         print(f"  {a_name:<7} vs {b_name:<7}  {r['win_rate']*100:5.1f}%")
 
     if args.save:

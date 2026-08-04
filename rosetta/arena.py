@@ -16,13 +16,15 @@ def duel(
     hero_class: str = "MAGE",
     seed: int = 0,
     max_steps: int = 5000,
+    deck: list[str] | None = None,
 ) -> dict[str, float]:
     """打 `episodes` 局，一半让 bot1 先手，一半让 bot2 先手。
 
     返回 bot1 的胜率、平局率和平均步数。同职业镜像 + 同构套牌，
     所以 50% 就是没有优势。
     """
-    deck = decks.vanilla()
+    if deck is None:
+        deck = decks.vanilla()
     wins = draws = steps_total = 0
 
     for episode in range(episodes):

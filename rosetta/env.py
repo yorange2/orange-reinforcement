@@ -7,6 +7,11 @@ C++ 引擎包成了 reset / legal_actions / step / observe 四件套。官方的
 
 from __future__ import annotations
 
+# 部分 RosettaStone 卡牌实现有内存 bug，会污染 pybind11 的类型注册表，
+# 导致 Python GC 在回收 pybind11 对象时崩溃。必须在 pybind11 模块导入前禁用 GC。
+import gc
+gc.disable()
+
 try:
     from . import rosetta_env as _native
 except ImportError as exc:  # pragma: no cover - 只在没编译时触发
