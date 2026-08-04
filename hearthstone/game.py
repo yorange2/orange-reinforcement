@@ -30,6 +30,9 @@ from dataclasses import dataclass, field
 from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 from .cards import (
+    AURA_ADJACENT,
+    AURA_FRIENDLY,
+    AURA_OTHERS,
     CHARGE,
     DIVINE_SHIELD,
     ELUSIVE,
@@ -118,10 +121,21 @@ class Minion:
     圣盾会被打掉、潜行会因为攻击而失去、复生只能触发一次。
     """
 
+    #: 属性分三层：卡面基础值 + 永久增益 + 光环加成。光环那一层由
+    #: `Game._refresh_auras` 每次场面变化后整体重算，所以加减永远幂等、不会漂移。
+    #:
+    #: 血量**不直接存**，只记"受了多少伤"（`damage`），`health` 是算出来的。
+    #: 这样光环消失时 `max_health` 下降、`damage` 不变，血量自动落到正确的值——
+    #: 一个被光环加成过又受过伤的随从，光环没了不会算成负数，也不会把伤害抹掉。
     card: CardDef
-    attack: int
-    health: int
-    max_health: int
+    base_attack: int
+    base_health: int
+    buff_attack: int = 0            # 永久增益（战吼、法术）
+    buff_health: int = 0
+    aura_attack: int = 0            # 光环加成，重算得出，别手动改
+    aura_health: int = 0
+    damage: int = 0                 # 累计受到的伤害
+    to_be_destroyed: bool = False   # 剧毒/直接消灭：和伤害无关的死亡
     attacks_left: int = 1
     just_played: bool = True        # 本回合出场
     divine_shield: bool = False
@@ -141,9 +155,8 @@ class Minion:
     def summon(cls, card: CardDef, uid: int = 0) -> "Minion":
         return cls(
             card=card,
-            attack=card.attack,
-            health=card.health,
-            max_health=card.health,
+            base_attack=card.attack,
+            base_health=card.health,
             attacks_left=cls.max_attacks(card),
             just_played=True,
             divine_shield=card.has(DIVINE_SHIELD),
@@ -160,8 +173,24 @@ class Minion:
         return self.card.name
 
     @property
+    def attack(self) -> int:
+        return max(0, self.base_attack + self.buff_attack + self.aura_attack)
+
+    @property
+    def max_health(self) -> int:
+        return self.base_health + self.buff_health + self.aura_health
+
+    @property
+    def health(self) -> int:
+        return self.max_health - self.damage
+
+    @property
+    def dead(self) -> bool:
+        return self.to_be_destroyed or self.health <= 0
+
+    @property
     def damaged(self) -> bool:
-        return self.health < self.max_health
+        return self.damage > 0
 
     @property
     def asleep(self) -> bool:
@@ -526,6 +555,7 @@ class Game:
         else:
             # 随从先落地再触发战吼——和炉石一致，战吼里的 AoE 会打到自己
             self.boards[player].append(Minion.summon(card, self._take_uid()))
+            self._refresh_auras()          # 光环随从落地立刻生效
             self._resolve(player, card.battlecry, target)
 
     def _resolve(self, player: int, effect, target: int = HERO) -> None:
@@ -551,6 +581,7 @@ class Game:
                 if len(self.boards[player]) >= BOARD_LIMIT:
                     break
                 self.boards[player].append(Minion.summon(token, self._take_uid()))
+            self._refresh_auras()
 
         if effect.destroy_all:
             self.boards[0] = []
@@ -582,7 +613,7 @@ class Game:
             if 0 <= target < len(board):
                 self._require_targetable(board[target])
                 if effect.destroy_target:
-                    board[target].health = 0
+                    board[target].to_be_destroyed = True
                 else:
                     sheep = Minion.summon(SHEEP, self._take_uid())
                     sheep.just_played = board[target].just_played
@@ -593,12 +624,11 @@ class Game:
         if effect.heal > 0 or effect.buff_attack or effect.buff_health or effect.grant:
             for minion in self._buff_targets(player, effect, target):
                 if effect.heal > 0:
-                    minion.health = min(minion.health + effect.heal, minion.max_health)
+                    minion.damage = max(0, minion.damage - effect.heal)
                 if effect.buff_attack:
-                    minion.attack += effect.buff_attack
+                    minion.buff_attack += effect.buff_attack
                 if effect.buff_health:
-                    minion.health += effect.buff_health
-                    minion.max_health += effect.buff_health
+                    minion.buff_health += effect.buff_health
                 for word in effect.grant:
                     minion.granted = minion.granted + (word,)
                     if word == DIVINE_SHIELD:
@@ -722,9 +752,9 @@ class Game:
             dealt_in = self._hit(attacker, to_attacker)
 
             if dealt_out and attacker.has(POISONOUS):
-                defender.health = 0     # 剧毒：只要伤害进去了就直接死
+                defender.to_be_destroyed = True   # 剧毒：伤害进去了就直接死
             if dealt_in and defender.has(POISONOUS):
-                attacker.health = 0
+                attacker.to_be_destroyed = True
 
             self._drain(player, attacker, dealt_out)
             self._drain(1 - player, defender, dealt_in)
@@ -760,7 +790,7 @@ class Game:
             # 武器伤害打过去
             dealt = self._hit(defender, weapon.attack)
             if dealt and weapon.has("剧毒"):
-                defender.health = 0
+                defender.to_be_destroyed = True
             self._drain(player, weapon, dealt)
             self._clear_dead()
 
@@ -769,6 +799,44 @@ class Game:
             self.weapons[player] = None
         self.hero_attacked[player] = True
         self._check_over()
+
+    def _refresh_auras(self) -> None:
+        """整体重算所有光环加成。
+
+        **不做增量加减**——每次从零开始重新累加。光环的来源会因为出场、死亡、变形、
+        位置变化而不断增删，增量维护必然会漏掉某条路径并留下永久漂移；全量重算便宜
+        （场上最多 7 个随从）且永远自洽。
+
+        调用时机是任何可能改变场面的操作之后，见 `_board_changed`。
+        """
+        for board in self.boards:
+            for minion in board:
+                minion.aura_attack = 0
+                minion.aura_health = 0
+
+        for player in range(N_PLAYERS):
+            board = self.boards[player]
+            for i, source in enumerate(board):
+                aura = source.card.aura
+                if aura is None:
+                    continue
+                for j, target in enumerate(board):
+                    if aura.scope == AURA_OTHERS and j == i:
+                        continue
+                    if aura.scope == AURA_ADJACENT and abs(j - i) != 1:
+                        continue
+                    if aura.only_keyword and not target.has(aura.only_keyword):
+                        continue
+                    target.aura_attack += aura.attack
+                    target.aura_health += aura.health
+
+    def _board_changed(self) -> None:
+        """场面变了：重算光环，再结算因此产生的死亡。
+
+        光环掉了可能直接打死随从——比如靠 +0/+2 撑着的随从，光环来源一死它也跟着走。
+        所以顺序是"先重算、再清场"，而 `_clear_dead` 里会再调一次，形成收敛。
+        """
+        self._refresh_auras()
 
     def _thaw(self, player: int) -> None:
         """解冻 `player` 的所有角色。
@@ -818,7 +886,7 @@ class Game:
         if minion.divine_shield:
             minion.divine_shield = False
             return 0
-        minion.health -= amount
+        minion.damage += amount
         return amount
 
     def _drain(self, player: int, source, dealt: int) -> None:
@@ -851,23 +919,32 @@ class Game:
         复生有场地限制：如果死亡时棋盘是满的，复生不会触发（没有空间）。
         这和炉石一致——死亡结算时，死掉的随从还没有真正离开棋盘。
         """
+        # 先按当前光环算出属性，再判生死——靠光环撑着的随从，来源一走就该跟着死。
+        # 移除之后光环又会变，所以循环到没有新的死亡为止（场上最多 7 个，必然收敛）。
         dying: List[Tuple[int, Minion]] = []
-        for player in range(N_PLAYERS):
-            board = self.boards[player]
-            n_before = len(board)
-            survivors: List[Minion] = []
-            for minion in board:
-                if minion.health > 0:
-                    survivors.append(minion)
-                    continue
-                if minion.card.deathrattle is not None:
-                    dying.append((player, minion))
-                if minion.reborn and n_before < BOARD_LIMIT and len(survivors) < BOARD_LIMIT:
-                    back = Minion.summon(minion.card, self._take_uid())
-                    back.health = 1
-                    back.reborn = False
-                    survivors.append(back)
-            self.boards[player] = survivors
+        while True:
+            self._refresh_auras()
+            died = False
+            for player in range(N_PLAYERS):
+                board = self.boards[player]
+                n_before = len(board)
+                survivors: List[Minion] = []
+                for minion in board:
+                    if not minion.dead:
+                        survivors.append(minion)
+                        continue
+                    died = True
+                    if minion.card.deathrattle is not None:
+                        dying.append((player, minion))
+                    if (minion.reborn and n_before < BOARD_LIMIT
+                            and len(survivors) < BOARD_LIMIT):
+                        back = Minion.summon(minion.card, self._take_uid())
+                        back.damage = back.max_health - 1
+                        back.reborn = False
+                        survivors.append(back)
+                self.boards[player] = survivors
+            if not died:
+                break
 
         # 亡语在随从离开棋盘之后才结算——这样召唤类亡语才有位置放。
         # 亡语本身可能再打死随从，`_resolve` 结尾会再调一次 `_clear_dead`，
