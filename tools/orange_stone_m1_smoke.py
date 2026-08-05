@@ -195,11 +195,40 @@ def section_g4() -> None:
         print(f"  ✓ 非法 bot 名抛 ValueError：{e}")
 
 
+def section_g5() -> None:
+    """G5 — clone()（搜索/回滚的分支能力）。"""
+    print("=== G5 clone() ===")
+    env = os.GameEnv(seed=31, bot="none")
+    env.reset(seed=31)
+    before = env.observation()
+
+    # 克隆从同一状态出发
+    branch = env.clone()
+    assert branch.observation() == before, "clone 必须从相同状态出发"
+    print("  ✓ clone 从相同状态出发")
+
+    # 在 clone 上走一步，原 env 不受影响
+    acts = branch.structured_legal_actions()
+    end = next(a.index for a in acts if a.kind == "end_turn")
+    branch.step(end)
+    assert branch.observation() != before, "clone 推进后状态应变化"
+    assert env.observation() == before, "推进 clone 不得影响原 env"
+    print("  ✓ 推进 clone 不影响原 env")
+
+    # 从 clone 再分叉一层，互不影响
+    deeper = branch.clone()
+    deeper_obs = deeper.observation()
+    branch.step(0)
+    assert deeper.observation() == deeper_obs, "兄弟分叉互不影响"
+    print("  ✓ clone 可多级分叉（搜索树的回滚基础）")
+
+
 def main() -> None:
     print(f"orange_stone {os.__version__} | obs_len={os.GameEnv.obs_len()}")
     section_g2()
     section_g3()
     section_g4()
+    section_g5()
     print("\n全部 M1 小节通过 ✓")
 
 
