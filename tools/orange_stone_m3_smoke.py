@@ -28,10 +28,10 @@ MAX_STEPS = 3000
 
 
 def section_features() -> None:
-    """v7 特征：199 维定版、共享局面尾、先手首回合 1 水晶（orange-stone #70）。"""
-    print("=== 特征 v7 ===")
-    assert FEATURE_DIM == 199, f"v7 应定版 199 维，实际 {FEATURE_DIM}"
-    assert ACTION_DIM == 31 and STATE_DIM == 168, \
+    """v7+ 特征：223 维定版、共享局面尾、先手首回合 1 水晶（orange-stone #70）。"""
+    print("=== 特征 v7+ ===")
+    assert FEATURE_DIM == 223, f"v7+ 应定版 223 维，实际 {FEATURE_DIM}"
+    assert ACTION_DIM == 47 and STATE_DIM == 176, \
         f"布局不对: {ACTION_DIM} + {STATE_DIM}"
     env = Env(deck=decks.vanilla(), seed=3)
     env.reset(seed=3)
@@ -43,7 +43,7 @@ def section_features() -> None:
     rows = batch_features(obs, actions, going_first=1.0)
     assert rows.shape == (len(actions), FEATURE_DIM)
     assert (rows[0, ACTION_DIM:] == rows[:, ACTION_DIM:]).all()
-    print(f"  ✓ v7 = {FEATURE_DIM} 维（动作 {ACTION_DIM} + 局面 {STATE_DIM}），"
+    print(f"  ✓ v7+ = {FEATURE_DIM} 维（动作 {ACTION_DIM} + 局面 {STATE_DIM}），"
           f"候选 {len(actions)} 个，局面尾共享，先手首回合 {obs.me.total_mana} 水晶")
 
 
