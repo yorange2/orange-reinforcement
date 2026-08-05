@@ -310,12 +310,27 @@ def section_g7() -> None:
             ), f"输必须按赢家剩血给分（seed {seed}，期望 {expected}，实际 {r}）"
     print("  ✓ health_scaled：10 局逐局满足 赢=+1 / 输=−(赢家剩血)/30")
 
-    # 两种口径在同 seed 下打完的 winner 一致（只改奖励不改流程）
-    _, r1, w1 = play(77, "sparse")
-    _, r2, w2 = play(77, "health_scaled")
+    # 两种口径在同 seed 下打完的 winner 一致（只改奖励不改流程）。
+    # 注意：引擎更新（法力修复/潜行入池）会改变特定 seed 的对局结果，所以
+    # 期望值按实际 winner 计算，不硬编码胜负。
+    e1, r1, w1 = play(77, "sparse")
+    e2, r2, w2 = play(77, "health_scaled")
     assert w1 == w2, "奖励口径不得影响对局流程"
-    assert r1 == -1.0, "sparse 输 = −1"
-    assert r2 != -1.0, "health_scaled 输 ≠ −1"
+    obs1 = e1.structured_observation()
+    if obs1.winner == 0:
+        assert r1 == 0.0
+    elif obs1.winner == 1:
+        assert r1 == 1.0, "sparse 赢 = +1"
+    else:
+        assert r1 == -1.0, "sparse 输 = −1"
+    # health_scaled 按公式校验（赢家满血时输家也是 −1.0，不能拿 ±1 区分口径）
+    obs2 = e2.structured_observation()
+    if obs2.winner == 0:
+        assert r2 == 0.0
+    elif obs2.winner == 1:
+        assert r2 == 1.0
+    else:
+        assert abs(r2 - (-obs2.opponent.hero_health / 30.0)) < 1e-5
     print(f"  ✓ 同 seed 两种口径 winner 一致（sparse={r1:.3f} vs scaled={r2:.3f}, winner={w1}）")
 
     # 非法口径报错
