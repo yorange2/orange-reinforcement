@@ -22,9 +22,13 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.distributions import Categorical
 
 from .arena import evaluate_all, format_table, play_game
+from .batched import BatchedEnv
 from .bots import BOTS
+from .decks import vanilla
+from .features import FEATURE_DIM, batch_features
 from .policy import (
     NORMS,
     PolicyAgent,
@@ -103,6 +107,158 @@ def train(args: argparse.Namespace) -> PolicyAgent:
             agent.training = True
 
     return agent
+
+
+def _batch_sample(net, decisions, device):
+    """给一批 agent 决策点批量打分采样（M4 批量训练）。
+
+    `decisions` = [(obs, legal_actions, going_first), ...]；返回
+    (indices, steps)——padded 矩阵一次前向，每局采样一个动作并记录 Step。
+    """
+    n = len(decisions)
+    widest = max(len(legal) for _, legal, _ in decisions)
+    dim = FEATURE_DIM
+    features = torch.zeros(n, widest, dim, device=device)
+    mask = torch.zeros(n, widest, dtype=torch.bool, device=device)
+    for i, (obs, legal, going_first) in enumerate(decisions):
+        rows = torch.from_numpy(batch_features(obs, legal, going_first))
+        features[i, : rows.shape[0]] = rows
+        mask[i, : rows.shape[0]] = True
+
+    indices: List[int] = []
+    steps: List[Step] = []
+    with torch.no_grad():
+        logits, _ = net(features, mask)
+        dist = Categorical(logits=logits)
+        sampled = dist.sample()
+        log_probs = dist.log_prob(sampled)
+        for i, (obs, legal, _gf) in enumerate(decisions):
+            index = int(sampled[i].item())
+            indices.append(index)
+            if len(legal) > 1:
+                steps.append(Step(
+                    features=features[i].cpu(),  # 已 detach（no_grad）
+                    action=index,
+                    log_prob=float(log_probs[i]),
+                ))
+    return indices, steps
+
+
+def train_parallel(args: argparse.Namespace) -> PolicyAgent:
+    """批量采样训练（路线图 M4）：N 局同时推进。
+
+    - 决策批量前向：所有 agent 决策点拼成一个 padded 矩阵，一次 forward；
+    - 引擎工作走 `orange_stone.BatchEnv` 的单次批量调用（allow_threads 释放
+      GIL，多块批量叠线程池可继续并行）；
+    - 每局只有一个 GameEnv（结构化观测是行动方视角），省掉单局 Env 的
+      双实例锁步。
+
+    采样口径与 `train()` 一致（PPO 更新代码共用 `_update`）。
+    """
+    n = args.parallel
+    torch.manual_seed(args.seed)
+    rng = random.Random(args.seed)
+    device = torch.device(args.device)
+
+    net = UnifiedNet(hidden=args.hidden, layers=args.layers, norm=args.norm,
+                     residual=args.residual).to(device)
+    if not args.quiet:
+        print(f"UnifiedNet: {args.layers} 层 x {args.hidden} 宽，归一化 {args.norm}"
+              f"，共 {net.n_params:,} 个参数（批量采样 ×{n}）")
+    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
+    agent = PolicyAgent(net, device=device, training=False, seed=args.seed)
+
+    # 座位轮换：偶数局坐 P1，奇数局坐 P2
+    perspectives = [0 if i % 2 == 0 else 1 for i in range(n)]
+    seeds = [rng.randrange(1 << 30) for _ in range(n)]
+    batch = BatchedEnv(n, vanilla(), seeds, perspectives=perspectives,
+                       bot="none", terminal_reward="health_scaled")
+    bots = [build_opponent(args.opponent, rng) for _ in range(n)]
+
+    trajs: List[List[Step]] = [[] for _ in range(n)]       # 每局的轨迹
+    batch_steps: List[Step] = []
+    batch_episodes: List[Tuple[int, float, int]] = []
+    recent_wins: List[int] = []
+    episode = 0
+    last_logged = -1
+    started = time.time()
+
+    for it in range(args.max_iterations):
+        obs = batch.observe()
+        legal = batch.legal_actions()
+        active = batch.active_players()
+
+        # agent 的决策点（行动方 == 该局的 perspective）批量打分采样
+        dec_idx = [i for i in range(n)
+                   if legal[i] and active[i] == perspectives[i]]
+        decisions = [
+            (obs[i], legal[i], 1.0 if active[i] == 0 else 0.0)
+            for i in dec_idx
+        ]
+        if decisions:
+            sampled_indices, sampled_steps = _batch_sample(net, decisions, device)
+            for i, steps in zip(dec_idx, _split_by_env(sampled_steps, decisions)):
+                trajs[i].extend(steps)
+        else:
+            # 边界情况：某一轮所有局都轮到对手行动（批量同步漂移）
+            sampled_indices, sampled_steps = [], []
+
+        # 按局号填动作下标；其余决策点交给规则对手
+        indices = [0] * n
+        for i, idx in zip(dec_idx, sampled_indices):
+            indices[i] = idx
+        for i in range(n):
+            if legal[i] and active[i] != perspectives[i]:
+                indices[i] = bots[i].choose(obs[i], legal[i]).index
+
+        batch.step(indices)
+
+        # 收尾完成的局：轨迹 + 终局奖励入更新批，重开新局
+        done = batch.done()
+        for i in range(n):
+            if done[i]:
+                episode += 1
+                seat = perspectives[i] + 1
+                reward = batch.last_reward(i)
+                recent_wins.append(int(batch.winners()[i] == perspectives[i]))
+                if trajs[i]:
+                    batch_steps.extend(trajs[i])
+                    batch_episodes.append((len(trajs[i]), reward, seat))
+                    trajs[i] = []
+                # 只重开这一局（BatchEnv.reset_one 只换 seed，不影响其他局）
+                seeds[i] = rng.randrange(1 << 30)
+                bots[i] = build_opponent(args.opponent, rng)
+                batch.reset_one(i, seeds[i])
+
+        if episode and episode % (args.batch * n) == 0 and batch_steps:
+            _update(optimizer, net, batch_steps, batch_episodes, args, device)
+            batch_steps, batch_episodes = [], []
+
+        if (not args.quiet and episode and episode % args.log_every == 0
+                and episode != last_logged):
+            last_logged = episode
+            window = recent_wins[-args.log_every:]
+            elapsed = time.time() - started
+            print(
+                f"第 {episode:>6} 局  近 {len(window)} 局胜率 {sum(window) / len(window) * 100:5.1f}%"
+                f"  用时 {elapsed:5.1f}s  ({episode / elapsed:5.1f} 局/秒)"
+            )
+
+        if episode >= args.episodes:
+            break
+
+    return agent
+
+
+def _split_by_env(steps: List[Step], decisions: List) -> List[List[Step]]:
+    """把 `_batch_sample` 的连续 Step 列表按决策点切回每局一份。"""
+    out: List[List[Step]] = []
+    idx = 0
+    for _obs, legal, _gf in decisions:
+        count = 1 if len(legal) > 1 else 0
+        out.append(steps[idx:idx + count])
+        idx += count
+    return out
 
 
 def _update(optimizer, net, steps, episodes, args, device) -> None:
@@ -196,6 +352,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--device", default="cpu", help="cpu / mps / cuda")
     parser.add_argument("--quiet", action="store_true", help="不打印训练过程")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
+    parser.add_argument("--parallel", type=int, default=1,
+                        help="批量采样并发局数（M4；>1 走 BatchedEnv 批量训练）")
+    parser.add_argument("--max-iterations", type=int, default=2_000_000,
+                        help="批量训练的迭代步数上限（默认足够大，由 episodes 控制局数）")
     parser.add_argument("--save", metavar="PATH", help="把训练好的权重存到这里")
     return parser.parse_args(argv)
 
@@ -206,7 +366,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"算法: {args.algo}   训练对手: {args.opponent}   局数: {args.episodes}   设备: {args.device}")
     print("双人游戏，先后手轮换，随机基准胜率 50%\n")
 
-    agent = train(args)
+    if args.parallel > 1:
+        agent = train_parallel(args)
+    else:
+        agent = train(args)
 
     print("\n最终评测（贪心策略，先后手轮换）")
     stats = evaluate_all(agent.eval_agent(), games=args.final_eval_games, seed=999)

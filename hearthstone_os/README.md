@@ -114,6 +114,28 @@ G9 子集镜像卡组（`decks.vanilla()`，15 种 × 2），胜率矩阵每对 
    +1.0），搜索把"结束回合"排在真斩杀前面，对着 1 血空场对手无限拖
    回合。修复：价值预测裁剪到 [−1, +1] + 终局斩杀无条件优先。
 
+## M4 批量与性能（2026-08-06 实测）
+
+**吞吐基准表**（M3 Pro，vanilla 镜像卡组）：
+
+| 配置 | 局/s | 对照 |
+| --- | --- | --- |
+| M0 基线（GameEnv Python 驱动，随机 vs Greedy，随机卡组） | ~970 | — |
+| M4 引擎批量（`battle_batch`，rayon 全 Rust，Greedy vs Greedy） | ~4,200 | ≈4.4× M0 基线 / **9.2× rosetta（460）** |
+| M4 Python 批量（`BatchedEnv`，4 线程，随机 vs Greedy） | ~1,850 | ≈1.9× M0 基线 |
+| M4 批量训练（`train --parallel 8`，vs rule） | ~150-185 | ≈1.8× 单局训练（~90） |
+
+实现：
+- **Rust 侧（orange-stone #71）**：热方法（step/legal_actions/structured_*）在
+  `allow_threads` 里释放 GIL（引擎纯 Rust + 逐局 RNG，线程安全）；新增
+  `BatchEnv`（一次调用驱动 N 局，结构化观测直接给**当前行动方视角**——
+  批量训练不需要双实例锁步）；新增 `battle_batch`（rayon 批量 bot-vs-bot）
+- **Python 侧**：`batched.py` 的 `BatchedEnv` 门面 + 吞吐跑分；`train.py
+  --parallel N` 批量训练（决策 padded 矩阵一次前向，完成的局单独
+  `reset_one` 重开）
+- **确定性**：批量与单局逐 seed 结果一致（`test_batched.py` 断言；
+  确定性策略下 BatchedEnv 与单局 Env 的 12 局 winner 完全一致）
+
 ## 对拍测试（tests/test_parity.py）
 
 同 seed、同镜像卡组、同一受限随机策略，简版引擎（`hearthstone/`）与
