@@ -277,6 +277,55 @@ def section_g6() -> None:
     print(f"  ✓ 带硬币确定性：seed 5 两次完局逐位一致（{len(a1)} 步, winner={w1}）")
 
 
+def section_g7() -> None:
+    """G7 — 奖励口径参数化（health_scaled 终局奖励）。"""
+    print("=== G7 奖励口径 ===")
+    deck = ["CLASSIC_001"] * 10
+
+    def play(seed: int, terminal_reward: str):
+        e = os.GameEnv(seed=seed, deck=deck, bot="none", terminal_reward=terminal_reward)
+        for _ in range(3000):
+            legal = e.structured_legal_actions()
+            i = next((a.index for a in legal if a.kind == "play"), None)
+            if i is None:
+                i = next((a.index for a in legal if a.kind == "attack"), None)
+            if i is None:
+                i = next(a.index for a in legal if a.kind == "end_turn")
+            _, reward, done, winner = e.step(i)
+            if done:
+                return e, reward, winner
+        raise AssertionError("对局未在步数上限内结束")
+
+    # health_scaled：赢 = +1，输 = −(赢家剩血)/30 —— 逐局按公式精确断言
+    for seed in range(50, 60):
+        e, r, winner = play(seed, "health_scaled")
+        assert -1.0 <= r <= 1.0
+        obs = e.structured_observation()
+        if obs.winner == 1:  # P1（视角方）赢
+            assert r == 1.0, f"赢必须是 +1（seed {seed}，实际 {r}）"
+        else:  # P2 赢：输 = −(P2 剩血)/30 ∈ (−1, 0)
+            expected = -obs.opponent.hero_health / 30.0
+            assert (
+                abs(r - expected) < 1e-5
+            ), f"输必须按赢家剩血给分（seed {seed}，期望 {expected}，实际 {r}）"
+    print("  ✓ health_scaled：10 局逐局满足 赢=+1 / 输=−(赢家剩血)/30")
+
+    # 两种口径在同 seed 下打完的 winner 一致（只改奖励不改流程）
+    _, r1, w1 = play(77, "sparse")
+    _, r2, w2 = play(77, "health_scaled")
+    assert w1 == w2, "奖励口径不得影响对局流程"
+    assert r1 == -1.0, "sparse 输 = −1"
+    assert r2 != -1.0, "health_scaled 输 ≠ −1"
+    print(f"  ✓ 同 seed 两种口径 winner 一致（sparse={r1:.3f} vs scaled={r2:.3f}, winner={w1}）")
+
+    # 非法口径报错
+    try:
+        os.GameEnv(seed=1, terminal_reward="dense")
+        raise AssertionError("非法口径应抛 ValueError")
+    except ValueError as e:
+        print(f"  ✓ 非法口径抛 ValueError：{e}")
+
+
 def main() -> None:
     print(f"orange_stone {os.__version__} | obs_len={os.GameEnv.obs_len()}")
     section_g2()
@@ -284,6 +333,7 @@ def main() -> None:
     section_g4()
     section_g5()
     section_g6()
+    section_g7()
     print("\n全部 M1 小节通过 ✓")
 
 
