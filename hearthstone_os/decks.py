@@ -50,6 +50,9 @@ SUBSET_MAP: dict[str, str] = {
     # ---- 风怒
     "NEUTRAL_C04": "年轻的多头龙鹰", # 1/1/1
     "CLASSIC_016": "风怒鹰身人",     # 6/4/5
+    # ---- 潜行（orange-stone #72 之后实现）
+    "NEUTRAL_C10": "丛林豹",         # 3/4/2
+    "NEUTRAL_T14": "荆棘谷猛虎",     # 5/5/5
 }
 
 #: G9 子集卡 ID（供对拍测试构造卡池）。
@@ -70,8 +73,8 @@ VANILLA_IDS: list[str] = [
     "NEUTRAL_T08",   # 冰风雪人      4/4/5
     "CLASSIC_008",   # 森金持盾卫士  4/3/5 嘲讽
     "NEUTRAL_014",   # 银月城卫兵    4/3/3 圣盾
+    "NEUTRAL_C10",   # 丛林豹        3/4/2 潜行（orange-stone #72 后）
     "CLASSIC_016",   # 风怒鹰身人    6/4/5 风怒
-    "NEUTRAL_T09",   # 石拳食人魔    6/6/7
 ]
 
 
