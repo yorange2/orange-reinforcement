@@ -1,7 +1,8 @@
-"""观战 / 评测的命令行入口（路线图 M2，抄 `rosetta/play.py`）。
+"""观战 / 评测 / 人机的命令行入口（路线图 M2/M6，抄 `rosetta/play.py`）。
 
     .venv/bin/python -m hearthstone_os.play                      # 看两个机器人打一局
     .venv/bin/python -m hearthstone_os.play --bots greedy random
+    .venv/bin/python -m hearthstone_os.play --human             # 人机（输入动作下标）
     .venv/bin/python -m hearthstone_os.play --bench 400          # 跑胜率
     .venv/bin/python -m hearthstone_os.play --matrix 200         # 胜率矩阵（对角线 ≈ 50%）
 """
@@ -14,6 +15,33 @@ import time
 from . import arena, decks
 from .bots import BOTS
 from .env import Env, describe_action
+
+
+class HumanBot:
+    """终端人机：打印局面和动作列表，输入下标出牌。"""
+
+    name = "human"
+
+    def __init__(self, seed: int | None = None) -> None:
+        pass
+
+    def choose(self, obs, actions) -> "Action":
+        from .env import Action
+
+        for i, a in enumerate(actions):
+            print(f"  [{i}] {describe_action(a, obs)}")
+        while True:
+            try:
+                line = input("你的选择 (0-9, q=结束回合) > ").strip()
+                if line == "q":
+                    return next(a for a in actions if a.kind == "end_turn")
+                idx = int(line)
+                if 0 <= idx < len(actions):
+                    return actions[idx]
+            except (ValueError, StopIteration):
+                pass
+            print("  输入无效，重新来")
+        raise AssertionError("unreachable")
 
 
 def _render(obs) -> str:
@@ -51,7 +79,9 @@ def watch(bot1_name: str, bot2_name: str, seed: int) -> None:
     env = Env(deck=deck, seed=seed)
     env.reset(seed=seed)
 
-    seats = {1: BOTS[bot1_name](seed), 2: BOTS[bot2_name](seed + 1)}
+    bots = dict(BOTS)
+    bots["human"] = HumanBot
+    seats = {1: bots[bot1_name](seed), 2: bots[bot2_name](seed + 1)}
     labels = {1: bot1_name, 2: bot2_name}
 
     turn = -1
@@ -116,6 +146,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="orange-stone 炉石对战")
     parser.add_argument("--bots", nargs=2, default=["greedy", "random"],
                         choices=sorted(BOTS), metavar=("BOT1", "BOT2"))
+    parser.add_argument("--human", action="store_true",
+                        help="人机模式：你坐 P1，对手是 --bot（默认 rule）")
+    parser.add_argument("--bot", default="rule", choices=sorted(BOTS),
+                        help="人机模式的对手（默认 rule）")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--bench", type=int, metavar="N",
                         help="不观战，直接跑 N 局报胜率")
@@ -127,6 +161,8 @@ def main() -> None:
         show_matrix(args.matrix, args.seed)
     elif args.bench:
         bench(args.bots[0], args.bots[1], args.bench, args.seed)
+    elif args.human:
+        watch("human", args.bot, args.seed)
     else:
         watch(args.bots[0], args.bots[1], args.seed)
 
