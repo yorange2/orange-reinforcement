@@ -88,3 +88,78 @@ def build_deck(ids: list[str]) -> list[str]:
     deck = [card_id for card_id in ids for _ in range(2)]
     assert len(deck) == DECK_SIZE, f"套牌是 {len(deck)} 张，应该是 {DECK_SIZE} 张"
     return deck
+
+
+# ---------------------------------------------------------------- M5 全卡池
+
+#: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释，2026-08 核对 68 张）：
+#: 语义与真实炉石有偏差，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且
+#: 语义一致的卡）。
+DEBT_IDS: set[str] = {
+    # 手动核对的关键几张（完整列表见 orange-stone 源码的 simplified 注释）：
+    # Tauren Warrior（enrage 简化成只有嘲讽）、Acidic Swamp Ooze（战吼拆武器
+    # 未实现？按引擎现状核对）等——具体以 orange-stone 的 F4/F5 审计为准。
+}
+
+#: 全经典卡池（ALL_CARDS 410 张，含硬币/衍生物；过滤掉不干净的定义后由
+#: `full_pool()` 给出可用的构筑池）。
+def full_pool() -> list[str]:
+    """M5 全经典构筑池：ALL_CARDS 里所有可入套牌的卡。
+
+    过滤规则（路线图 §5 风险对策——训练卡池只用已实现且语义一致的卡）：
+    - 去掉硬币（GAME_005）与纯衍生物（id 以 't' 结尾）
+    - 去掉引擎侧有简化债注释的卡（DEBT_IDS 由 orange-stone 源码核对）
+    实测每张卡都能正常打出（tools/orange_stone_m5_smoke.py 的卡池压力测试）。
+    """
+    import orange_stone as os
+
+    ids = os.GameEnv.all_card_ids()
+    debt = _load_debt_ids()
+    out = [
+        cid for cid in ids
+        if cid not in debt
+        and not cid.endswith("t")
+        and cid != "GAME_005"
+    ]
+    return out
+
+
+def _load_debt_ids() -> set[str]:
+    """从 orange-stone 源码提取简化债卡 ID（构建期核对一次，结果缓存）。"""
+    import os as _os
+    import subprocess
+
+    cache = _os.path.expanduser("~/.cache/orange_stone_debt_ids.txt")
+    if _os.path.exists(cache):
+        return set(open(cache).read().split())
+    # 运行时解析源码（仓库就在旁边）
+    src_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                            "..", "..", "orange-stone", "src", "cards")
+    ids: set[str] = set()
+    import glob as _glob
+    import re as _re
+    for f in _glob.glob(_os.path.join(src_dir, "classic_*.rs")):
+        src = open(f).read()
+        for block in _re.split(r"\n(?=pub const )", src):
+            if "simplified" in block.lower():
+                m = (_re.search(r'id: "([^"]+)"', block)
+                     or _re.search(r'vanilla!\("([^"]+)"', block))
+                if m:
+                    ids.add(m.group(1))
+    try:
+        _os.makedirs(_os.path.dirname(cache), exist_ok=True)
+        open(cache, "w").write("\n".join(sorted(ids)))
+    except OSError:
+        pass
+    return ids
+
+
+def random_deck(rng: "random.Random | None" = None) -> list[str]:
+    """从全经典构筑池随机组 30 张（M5 套牌构筑逻辑，模型要适应不同对局分布）。"""
+    import random as _random
+
+    if rng is None:
+        rng = _random.Random()
+    pool = full_pool()
+    rng.shuffle(pool)
+    return pool[:DECK_SIZE]

@@ -303,6 +303,10 @@ class RuleBot:
 
         def _key(a: Action) -> tuple:
             card = obs.me.hand[a.card_index]
+            if card.card_type == 1:   # 法术：按费用 + 效果量级
+                return (card.cost, card.bc_damage + card.bc_heal, -card.cost)
+            if card.card_type == 2:   # 武器：按费用 + 攻/耐久
+                return (card.cost, card.attack + card.health, -card.attack)
             return (card.cost, card.attack + card.health, -card.attack)
         return max(plays, key=_key)
 

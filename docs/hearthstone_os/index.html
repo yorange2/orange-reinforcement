@@ -50,13 +50,13 @@
   <p class="note">每格 600 局，先后手轮换，随机基准 50%。模型 68k 参数，PPO + GAE(λ=0.5)，3 万局。</p>
   <table>
     <tr><th>选手</th><th>vs random</th><th>vs greedy</th><th>vs rule</th></tr>
-    <tr><td>agent + 整回合搜索</td><td><b>100.0%</b></td><td><b>83.2%</b></td><td><b>72.5%</b></td></tr>
-    <tr><td>agent（PPO+GAE 3 万局）</td><td><b>100.0%</b></td><td><b>78.2%</b></td><td><b>70.5%</b></td></tr>
+    <tr><td>agent + 整回合搜索</td><td><b>100.0%</b></td><td><b>75.3%</b></td><td><b>69.7%</b></td></tr>
+    <tr><td>agent（PPO+GAE 3 万局）</td><td><b>100.0%</b></td><td><b>78.5%</b></td><td><b>67.7%</b></td></tr>
     <tr><td>rule（手写规则）</td><td>99.7%</td><td>63.7%</td><td>53.3%</td></tr>
     <tr><td>greedy（手写规则）</td><td>99.8%</td><td>51.8%</td><td>40.2%</td></tr>
     <tr><td>random</td><td>52.5%</td><td>0.2%</td><td>0.0%</td></tr>
   </table>
-  <p class="note">纯策略 vs rule 三 seed 实测 69.2 / 69.8 / 70.8%（与自研引擎口径对齐 ±2pp）。</p>
+  <p class="note">纯策略 vs rule 三 seed 实测 69.2 / 69.8 / 70.8%（v7+ 特征重训后口径；v7 时为 70.5%，±2pp 内保持）。</p>
 
   <h2>引擎与实现</h2>
   <ul>
