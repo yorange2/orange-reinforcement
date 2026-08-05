@@ -33,3 +33,7 @@ rosetta/native/build/
 # RosettaStone 训练产物
 rosetta/models/*.pt
 
+
+# 训练产物：只有正式权重进版本库（惯例同 paodekuai）
+hearthstone_os/models/*.pt
+!hearthstone_os/models/agent.pt

@@ -87,11 +87,15 @@ def section_bots() -> None:
 
 
 def section_matrix() -> None:
-    """胜率矩阵：对角线 50% ± 2pp（M2 验收口径）。"""
-    print("=== 胜率矩阵（每对 1000 局，对角线应 ≈ 50%）===")
+    """胜率矩阵：对角线 50% ± 2pp（M2 验收口径）。
+
+    每对 2000 局（σ≈1.1pp，±2pp ≈ 1.8σ 带宽；1000 局的噪声会让
+    random 自打偶尔漂出 ±2pp）。
+    """
+    print("=== 胜率矩阵（每对 2000 局，对角线应 ≈ 50%）===")
     names = sorted(BOTS)
     start = time.time()
-    result = arena.matrix(names, episodes=1000, seed=0)
+    result = arena.matrix(names, episodes=2000, seed=0)
     header = "        " + "".join(f"{n:>8}" for n in names)
     print(header)
     for row in names:

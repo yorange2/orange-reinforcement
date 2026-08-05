@@ -96,6 +96,7 @@ class Env:
         self._second_player_coin = second_player_coin
         self._terminal_reward = terminal_reward
         self._seed = seed
+        self._last_rewards = (0.0, 0.0)
         # 双实例锁步：同 seed 构造 → 初始状态一致；后续所有 step 两边同步
         self._env0 = self._make(0)
         self._env1 = self._make(1)
@@ -117,6 +118,7 @@ class Env:
         """开一局新的。`seed=None` 沿用构造时的 seed。"""
         if seed is not None:
             self._seed = seed
+        self._last_rewards = (0.0, 0.0)
         self._env0.reset(self._seed)
         self._env1.reset(self._seed)
         return self.observe()
@@ -128,9 +130,18 @@ class Env:
     def step(self, action: Action | int) -> "_native.Observation":
         """执行动作（接受 `Action` 对象或裸下标），返回行动方视角的新局面。"""
         index = action.index if isinstance(action, Action) else int(action)
-        self._env0.step(index)
-        self._env1.step(index)
+        self._last_rewards = (
+            self._env0.step(index)[1],   # P1 视角的奖励
+            self._env1.step(index)[1],   # P2 视角的奖励
+        )
         return self.observe()
+
+    def last_reward(self, seat: int) -> float:
+        """上一步的引擎奖励（seat 0 = P1，1 = P2）。
+
+        奖励只在终局非零（`terminal_reward` 口径），训练时读这个算 GAE。
+        """
+        return self._last_rewards[seat]
 
     def observe(self) -> "_native.Observation":
         """当前**行动方**视角。`me` 带手牌，`opponent` 不带。
@@ -177,6 +188,11 @@ class Env:
     @property
     def turn(self) -> int:
         return self._view(0).structured_observation().turn
+
+    def hero_healths(self) -> list[int]:
+        """双方英雄剩余血量 [P1, P2]（P1 视角的结构化视图）。"""
+        obs = self._view(0).structured_observation()
+        return [obs.me.hero_health, obs.opponent.hero_health]
 
     # ------------------------------------------------------------ 内部
 
