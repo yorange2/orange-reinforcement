@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>炉石传说（orange-stone 引擎） · orange-reinforcement</title>
+<meta name="description" content="同一款简化炉石跑在 Rust 模拟器 orange-stone 上：经典卡池、官方开局、CoW 克隆整回合搜索。">
+<style>
+  :root {
+    --bg: #faf9f7; --fg: #1c1b19; --dim: #6b6862; --line: #e2ded7;
+    --card: #fff; --accent: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16151a; --fg: #eceaf0; --dim: #94909d; --line: #2e2c36;
+      --card: #1e1d24; --accent: #fb923c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 3rem 1rem 4rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.65 ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .4rem; }
+  h1 a { color: var(--dim); font-size: .85rem; text-decoration: none; float: right; }
+  .sub { color: var(--dim); margin: 0 0 1.5rem; }
+  h2 { font-size: 1.05rem; margin: 1.6rem 0 .5rem; }
+  a { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; }
+  td b { font-variant-numeric: tabular-nums; }
+  .note { color: var(--dim); font-size: .85rem; }
+  pre {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: .8rem 1rem; overflow-x: auto; font-size: .82rem;
+  }
+  footer { margin-top: 2.5rem; color: var(--dim); font-size: .88rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>炉石传说（orange-stone 引擎）<a href="..">← 回首页</a></h1>
+  <p class="sub">同一款简化炉石跑在 Rust 模拟器 <b>orange-stone</b> 上：
+  经典卡池、官方规则开局（先手第一回合 1 水晶、后手 4 张 + 幸运币）、
+  CoW 克隆廉价恢复整回合 beam 搜索。</p>
+
+  <h2>战绩表</h2>
+  <p class="note">每格 600 局，先后手轮换，随机基准 50%。模型 68k 参数，PPO + GAE(λ=0.5)，3 万局。</p>
+  <table>
+    <tr><th>选手</th><th>vs random</th><th>vs greedy</th><th>vs rule</th></tr>
+    <tr><td>agent + 整回合搜索</td><td><b>100.0%</b></td><td><b>83.2%</b></td><td><b>72.5%</b></td></tr>
+    <tr><td>agent（PPO+GAE 3 万局）</td><td><b>100.0%</b></td><td><b>78.2%</b></td><td><b>70.5%</b></td></tr>
+    <tr><td>rule（手写规则）</td><td>99.7%</td><td>63.7%</td><td>53.3%</td></tr>
+    <tr><td>greedy（手写规则）</td><td>99.8%</td><td>51.8%</td><td>40.2%</td></tr>
+    <tr><td>random</td><td>52.5%</td><td>0.2%</td><td>0.0%</td></tr>
+  </table>
+  <p class="note">纯策略 vs rule 三 seed 实测 69.2 / 69.8 / 70.8%（与自研引擎口径对齐 ±2pp）。</p>
+
+  <h2>引擎与实现</h2>
+  <ul>
+    <li><b>引擎</b>：<a href="https://github.com/yorange2/orange-stone">orange-stone</a>（MIT），
+    ECS + CoW GameState + 事件驱动规则引擎，316 张经典卡</li>
+    <li><b>特征</b>：v7 = 199 维（31 动作 + 168 局面），结构化视图上构建</li>
+    <li><b>搜索</b>：整回合 beam（宽度 8），用 <code>Env.clone()</code> 恢复——rosetta 方案被
+    拷贝构造删除堵死的收益，在 orange-stone 上一行绑定</li>
+    <li><b>性能</b>：引擎批量 ~4,200 局/s（≈9× RosettaStone 绑定）；并行训练 ~170 局/s</li>
+  </ul>
+
+  <h2>怎么玩（终端人机）</h2>
+  <pre>.venv/bin/python -m hearthstone_os.play --human --bot rule
+# 打印局面和动作列表，输入下标出牌；q 结束回合</pre>
+
+  <h2>训练与复现</h2>
+  <pre>.venv/bin/python -m hearthstone_os.train --episodes 30000 --save hearthstone_os/models/agent.pt
+.venv/bin/python -m hearthstone_os.bench --model hearthstone_os/models/agent.pt</pre>
+
+  <footer>
+    <a href="https://github.com/yorange2/orange-reinforcement">源码、路线图与实验记录 →</a>
+  </footer>
+</main>
+</body>
+</html>
