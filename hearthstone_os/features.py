@@ -1,17 +1,18 @@
-"""把 (局面, 某个候选动作) 编码成定长向量（v7，199 维）。
+"""把 (局面, 某个候选动作) 编码成定长向量（v7+，223 维）。
 
 v7 是把 `hearthstone/features.py` 的 v5/v6 思路（48→76→197→251 的演进）
-移植到 orange-stone 结构化视图上的版本。按 2026-08 的引擎语义定版：
+移植到 orange-stone 结构化视图上的版本（199 维）；**v7+（M5）在引擎补上
+卡面文本视图字段后把 A_TEXT / S_TEXT 块加了回来，223 维**：
 
-- **关键词**：视图只暴露 5 个（嘲讽/圣盾/潜行/风怒/冲锋）+ 冻结/能动/可出，
-  所以 one-hot 从 v6 的 11 个收缩到 5 个；剧毒/吸血/复生/扰咒/法术增强等
-  M5 引擎补上视图后再说。
-- **无卡面文本块**（v6 的 A_TEXT 18 维 / S_TEXT 8 维）：G9 子集全是白板+
-  基础关键词卡，没有战吼/亡语/光环/触发；M5 卡池扩大时按卡 ID 建效果表。
+- **关键词**：视图暴露 5 个（嘲讽/圣盾/潜行/风怒/冲锋）+ 冻结/能动/可出；
+  M5 补了扰咒（elusive，orange-stone #73）
+- **卡面文本**（M5）：`A_TEXT` 16 维 = 标签（战吼/亡语/光环/触发）+ 战吼/
+  法术量级（damage/draw/summon/buff/heal/freeze/destroy）+ 亡语量级 + 光环
+  量级；`S_TEXT` 8 维 = 双方场上带文本随从数。战吼/法术共用 battlecry 槽。
 - **无先知特征**（v6 的 oracle）：orange-stone 绑定层不暴露对手手牌
   （`opponent.hand` 恒为空），非对称价值头无从谈起。
-- **无英雄技能/职业**：当前引擎英雄没有英雄技能（M2 核实），M5 再加。
-- **无疲劳**：视图没有疲劳字段（M5 引擎侧补）。
+- **无英雄技能/职业**：当前引擎英雄没有英雄技能（M2 核实）。
+- **无疲劳**：视图没有疲劳字段。
 
 特征布局沿用 v6 的三段式：动作特征（类型 + 出牌/攻击细节 + 交易结果）+
 共享局面尾（聚合 + 逐随从槽 + 逐手牌 + 斩杀检测 + 杂项）。交易结果的
@@ -38,13 +39,16 @@ OS_KEYWORDS = ("taunt", "divine_shield", "stealth", "windfury", "charge")
 # 动作特征
 A_TYPE = 3                     # 动作类型 one-hot (play/attack/end)
 A_CARD = 1 + 2 + 5             # 出牌：费用 + 攻/血 + 关键词 one-hot（视图的 5 个）
+#: 卡面文本（v7+，M5）：标签（战吼/亡语/光环/触发）+ 战吼/法术量级 + 亡语量级
+#: + 光环量级。v6 的 A_TEXT 思路重建在结构化视图的 effect 字段上（M5）。
+A_TEXT = 4 + 7 + 3 + 2
 A_ATTACKER = 2 + 1 + 1 + 1 + 1  # 攻击者：攻/血 + 剩余次数 + 圣盾/风怒/冲锋
 A_TARGET = 1 + 2 + 1 + 1 + 1    # 目标：人脸/攻/血 + 嘲讽/圣盾/潜行
 A_TRADE = 2 + 1 + 1            # 交易结果：谁死 + 过杀 + 场面差
 A_PLAY_EFFECT = 2 + 1           # 出牌效果：剩余水晶 + 用光/铺满
 A_LEGAL = 1                    # 候选动作数
 
-ACTION_DIM = (A_TYPE + A_CARD + A_ATTACKER + A_TARGET + A_TRADE
+ACTION_DIM = (A_TYPE + A_CARD + A_TEXT + A_ATTACKER + A_TARGET + A_TRADE
               + A_PLAY_EFFECT + A_LEGAL)
 
 # 局面特征
@@ -54,11 +58,13 @@ S_HAND = 1 + 1 + 2 + 1 + 1     # 手牌：张数 + 可出数 + 可出总攻/总�
 S_BOARD = 2 + 2 + 2 + 1        # 场面：随从数 + 总攻 + 总血 + 嘲讽挡脸
 S_BOARD_SLOTS = 7 * 9 + 7 * 9  # 双方场上逐随从（各 7 槽）：攻/血/能动/嘲/盾/潜/风/冲/冻
 S_HAND_CARDS = 5 * 3           # 手牌逐卡（前 3 低费可出）：费/攻/血/冲锋/潜行
+#: 场上文本感知（v7+）：双方各有多少带战吼/亡语/光环/触发的随从（M5）
+S_TEXT = 4 + 4
 S_LETHAL = 2                   # 斩杀检测
 S_OTHER = 4                    # 牌堆/对手手牌/先后手/bias
 
 STATE_DIM = (S_BASE + S_WEAPON + S_HAND + S_BOARD + S_BOARD_SLOTS
-             + S_HAND_CARDS + S_LETHAL + S_OTHER)
+             + S_HAND_CARDS + S_TEXT + S_LETHAL + S_OTHER)
 
 STATE_OFFSET = ACTION_DIM
 FEATURE_DIM = ACTION_DIM + STATE_DIM
@@ -91,6 +97,39 @@ def state_features(obs, going_first: float = 0.5) -> List[float]:
 
 
 # ---------------------------------------------------------------- 动作
+
+def _card_text(card) -> List[float]:
+    """卡面文本的 A_TEXT 维编码（v7+，M5）：标签 + 战吼/法术量级 + 亡语量级 + 光环量级。
+
+    战吼/法术共用 battlecry 槽，所以 bc_* 对两类都成立。白板随从整块为 0。
+    """
+    return [
+        # 标签
+        1.0 if card.has_battlecry else 0.0,
+        1.0 if card.has_deathrattle else 0.0,
+        1.0 if card.has_aura else 0.0,
+        1.0 if card.has_trigger else 0.0,
+        # 战吼/法术量级
+        card.bc_damage / 10.0,
+        card.bc_draw / 3.0,
+        card.bc_summon / 3.0,
+        card.bc_buff / 6.0,
+        card.bc_heal / 10.0,
+        1.0 if card.bc_freeze else 0.0,
+        1.0 if card.bc_destroy else 0.0,
+        # 亡语量级
+        card.dr_damage / 10.0,
+        card.dr_draw / 3.0,
+        card.dr_summon / 3.0,
+        # 光环量级
+        card.aura_attack / 3.0,
+        card.aura_health / 3.0,
+    ]
+
+
+#: 攻击和结束回合没有"卡面文本"可言，整块置零。
+_NO_TEXT = [0.0] * A_TEXT
+
 
 def _base_features(obs, action: Action) -> List[float]:
     if action.kind == "play":
@@ -126,6 +165,8 @@ def _play(obs, action: Action) -> List[float]:
         card.attack / 10.0,
         card.health / 10.0,
         *_kw_vec(card),
+        # 卡面文本
+        *_card_text(card),
         # 攻击者（出牌不涉及）
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         # 目标
@@ -192,6 +233,7 @@ def _attack(obs, action: Action) -> List[float]:
         # 卡牌（攻击时不涉及手牌）
         0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0,
+        *_NO_TEXT,
         # 攻击者
         att_atk / 10.0,
         att_hp / 10.0,
@@ -222,6 +264,7 @@ def _end() -> List[float]:
         0.0, 0.0, 1.0,
         0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0,
+        *_NO_TEXT,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0,
@@ -326,6 +369,15 @@ def _state_features(obs, going_first: float) -> List[float]:
         # 双方场上逐随从（各 7 槽）
         *_board_slots(my),
         *_board_slots(en),
+        # 场上文本感知（v7+，M5）：带战吼/亡语/光环/触发的随从数
+        float(sum(1 for m in my if m.has_battlecry)),
+        float(sum(1 for m in my if m.has_deathrattle)),
+        float(sum(1 for m in my if m.has_aura)),
+        float(sum(1 for m in my if m.has_trigger)),
+        float(sum(1 for m in en if m.has_battlecry)),
+        float(sum(1 for m in en if m.has_deathrattle)),
+        float(sum(1 for m in en if m.has_aura)),
+        float(sum(1 for m in en if m.has_trigger)),
         # 斩杀检测
         _can_kill(obs, mine=True),
         _can_kill(obs, mine=False),

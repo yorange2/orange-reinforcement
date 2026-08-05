@@ -27,7 +27,7 @@ from torch.distributions import Categorical
 from .arena import evaluate_all, format_table, play_game
 from .batched import BatchedEnv
 from .bots import BOTS
-from .decks import vanilla
+from .decks import random_deck, vanilla
 from .features import FEATURE_DIM, batch_features
 from .policy import (
     NORMS,
@@ -78,7 +78,11 @@ def train(args: argparse.Namespace) -> PolicyAgent:
         players[seat - 1] = agent
 
         agent.trajectory.clear()
-        result = play_game(players, rng=rng, seed=rng.randrange(1 << 30))
+        deck = None
+        if args.pool == "full":
+            deck = random_deck(rng)      # M5：每局从全经典构筑池随机组牌
+        result = play_game(players, rng=rng, seed=rng.randrange(1 << 30),
+                           deck=deck)
         # 终局奖励直接读引擎（health_scaled 口径，M1-G7 验证过公式）
         reward = result.rewards[seat - 1]
         recent_wins.append(int(result.winner == seat))
@@ -331,6 +335,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--clip-ratio", type=float, default=0.2, help="PPO 的概率比裁剪幅度")
     parser.add_argument("--opponent", default="rule",
                         choices=["random", "greedy", "rule", "mix"], help="训练对手")
+    parser.add_argument("--pool", default="vanilla", choices=["vanilla", "full"],
+                        help="卡池：vanilla=15 种镜像（M3 口径），full=全经典构筑池随机组牌（M5）")
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--gamma", type=float, default=0.99, help="折扣因子")
     parser.add_argument("--gae-lambda", type=float, default=0.5,

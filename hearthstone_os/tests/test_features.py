@@ -24,8 +24,8 @@ class TestDims(unittest.TestCase):
     def test_dim_layout(self):
         self.assertEqual(FEATURE_DIM, ACTION_DIM + STATE_DIM)
         self.assertEqual(STATE_OFFSET, ACTION_DIM)
-        # v7 定版 199 维（31 动作 + 168 局面），见 features.py 头注释
-        self.assertEqual(FEATURE_DIM, 199)
+        # v7+ 定版 223 维（47 动作 + 176 局面，M5 卡面文本块），见 features.py 头注释
+        self.assertEqual(FEATURE_DIM, 223)
 
     def test_batch_features_shape(self):
         env = make_state()
