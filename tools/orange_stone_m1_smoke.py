@@ -146,10 +146,60 @@ def section_g3() -> None:
     print(f"  ✓ 完局后结构化视图 done=True winner={final_obs.winner}（step winner={winner}）")
 
 
+def section_g4() -> None:
+    """G4 — 双方可控模式（bot='none'）。"""
+    print("=== G4 双方可控 ===")
+    env = os.GameEnv(seed=21, bot="none")
+    obs = env.structured_observation()
+    assert obs.my_turn, "开局由 P1 控制"
+    assert obs.opponent.hand_count == 3
+
+    # P1 EndTurn 后，控制权交到 P2（结构化视图 my_turn 翻转）
+    acts = env.structured_legal_actions()
+    end_turn_idx = next(a.index for a in acts if a.kind == "end_turn")
+    _, _, done, _ = env.step(end_turn_idx)
+    assert not done
+    obs2 = env.structured_observation()
+    assert not obs2.my_turn, "EndTurn 后轮到对手（P2），由外部驱动"
+    acts2 = env.structured_legal_actions()
+    assert all(a.kind in ("end_turn", "play") for a in acts2), "P2 回合的动作空间属于 P2"
+    print("  ✓ EndTurn 后控制权交到 P2，外部可继续 step")
+
+    # 双方交替驱动直到完局（固定卡组保证出牌/打脸能结束对局）
+    deck = ["CLASSIC_001"] * 10  # Bloodfen Raptor 3/2，镜像
+    env = os.GameEnv(seed=22, deck=deck, bot="none")
+    done = False
+    winner = None
+    for _ in range(3000):
+        legal = env.structured_legal_actions()
+        if not legal:
+            break
+        # 优先出牌，其次打脸，最后 EndTurn
+        i = next((a.index for a in legal if a.kind == "play"), None)
+        if i is None:
+            i = next((a.index for a in legal if a.kind == "attack"), None)
+        if i is None:
+            i = next(a.index for a in legal if a.kind == "end_turn")
+        _, _, done, winner = env.step(i)
+        if done:
+            break
+    assert done, "双方都由外部驱动时对局必须能打完"
+    assert winner is not None
+    print(f"  ✓ bot='none' 双方外部驱动完局：winner={winner}（0=P1, 1=P2）")
+
+    # 非法 bot 名报错
+    try:
+        os.GameEnv(seed=1, bot="wizard")
+        raise AssertionError("非法 bot 名应抛 ValueError")
+    except ValueError as e:
+        print(f"  ✓ 非法 bot 名抛 ValueError：{e}")
+
+
 def main() -> None:
     print(f"orange_stone {os.__version__} | obs_len={os.GameEnv.obs_len()}")
     section_g2()
     section_g3()
+    section_g4()
     print("\n全部 M1 小节通过 ✓")
 
 
