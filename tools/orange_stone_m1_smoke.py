@@ -223,12 +223,67 @@ def section_g5() -> None:
     print("  ✓ clone 可多级分叉（搜索树的回滚基础）")
 
 
+def section_g6() -> None:
+    """G6 — 起手可配（hand_size、后手硬币）。"""
+    print("=== G6 起手可配 ===")
+    deck = ["CLASSIC_001"] * 10  # 固定 10 张，牌库数可精确断言
+
+    # 默认：双方各 3 张，无硬币
+    env = os.GameEnv(seed=41, deck=deck)
+    obs = env.structured_observation()
+    assert obs.me.hand_count == 3 and obs.opponent.hand_count == 3
+    assert round(obs.me.deck_count) == 7 and round(obs.opponent.deck_count) == 7
+    print("  ✓ 默认开局：双方各 3 张")
+
+    # hand_size=4：双方各 4 张（P1 视角：我方牌库 6）
+    env = os.GameEnv(seed=42, deck=deck, hand_size=4)
+    obs = env.structured_observation()
+    assert obs.me.hand_count == 4 and obs.opponent.hand_count == 4
+    assert round(obs.me.deck_count) == 6
+    print("  ✓ hand_size=4：双方各 4 张")
+
+    # hand_size=3 + 硬币：P1 3 张，P2 4+硬币=5 张（硬币是额外手牌，不从牌库抽）
+    env = os.GameEnv(seed=43, deck=deck, second_player_coin=True)
+    obs = env.structured_observation()
+    assert obs.me.hand_count == 3, "P1 起手 3 张"
+    assert obs.opponent.hand_count == 5, "P2 起手 4 张 + 幸运币"
+    assert round(obs.opponent.deck_count) == 6, "P2 牌库 10-4（硬币不进牌库）"
+    print("  ✓ 后手硬币：P2 4 张 + 幸运币（共 5 张，牌库剩 6）")
+
+    # 确定性：同 seed 两次完局逐位一致（带硬币配置；脚本化驱动保证能打完）
+    def play(s: int):
+        e = os.GameEnv(seed=s, deck=deck, second_player_coin=True, bot="none")
+        acts = []
+        for _ in range(3000):
+            legal = e.structured_legal_actions()
+            if not legal:
+                break
+            # 优先出牌，其次打脸，最后 EndTurn
+            i = next((a.index for a in legal if a.kind == "play"), None)
+            if i is None:
+                i = next((a.index for a in legal if a.kind == "attack"), None)
+            if i is None:
+                i = next(a.index for a in legal if a.kind == "end_turn")
+            acts.append(i)
+            _, _, d, w = e.step(i)
+            if d:
+                return acts, w
+        return acts, None
+
+    a1, w1 = play(5)
+    a2, w2 = play(5)
+    assert a1 == a2 and w1 == w2, "带硬币配置同 seed 必须逐位一致"
+    assert w1 is not None, "脚本化驱动必须打完"
+    print(f"  ✓ 带硬币确定性：seed 5 两次完局逐位一致（{len(a1)} 步, winner={w1}）")
+
+
 def main() -> None:
     print(f"orange_stone {os.__version__} | obs_len={os.GameEnv.obs_len()}")
     section_g2()
     section_g3()
     section_g4()
     section_g5()
+    section_g6()
     print("\n全部 M1 小节通过 ✓")
 
 
