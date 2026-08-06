@@ -92,24 +92,24 @@ def build_deck(ids: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- M5 全卡池
 
-#: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释，2026-08 核对 68 处）：
-#: 语义与真实炉石有偏差，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且
-#: 语义一致的卡）。
-#: 权威清单在 orange-stone/docs/finished/fidelity-debt.md（F4/F5 持续审计账本，已归档）——
-#: 卡离开账本（实现 + F5 差分验证）后，删掉源码注释里的 "simplified" 字样，
-#: 本提取器就会自动把它放回卡池；注意失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
-DEBT_IDS: set[str] = {
-    # 示例：Tauren Warrior（enrage 简化成只有嘲讽）——完整列表以账本为准。
-}
+#: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释）：语义与真实
+#: 炉石有偏差时，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且语义一致的卡）。
+#: 权威清单在 orange-stone/docs/fidelity-debt.md（F4/F5 持续审计账本）。
+#: W0–W7（PR #79–#86）清偿 67 张后，2026-08-06 状态审计又补登记了 27 张此前
+#: 未标记的既有简化卡（账本 §11）——`_load_debt_ids()` 现在提取 27 个 ID，
+#: 卡池 = 413 − 27 债 − 硬币/衍生物 = 361。若未来新增简化卡，按账本的维护约定登记：
+#: 卡离开账本（实现 + F5 差分验证）后删掉源码注释里的 "simplified" 字样，
+#: 并失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
 
-#: 全经典卡池（ALL_CARDS 410 张，含硬币/衍生物；过滤掉不干净的定义后由
+#: 全经典卡池（ALL_CARDS 413 张，含硬币/衍生物；过滤掉不干净的定义后由
 #: `full_pool()` 给出可用的构筑池）。
 def full_pool() -> list[str]:
     """M5 全经典构筑池：ALL_CARDS 里所有可入套牌的卡。
 
     过滤规则（路线图 §5 风险对策——训练卡池只用已实现且语义一致的卡）：
     - 去掉硬币（GAME_005）与纯衍生物（id 以 't' 结尾）
-    - 去掉引擎侧有简化债注释的卡（DEBT_IDS 由 orange-stone 源码核对）
+    - 去掉引擎侧有简化债注释的卡（`_load_debt_ids()` 由 orange-stone 源码核对；
+      2026-08-06 补登记 27 张，见 orange-stone 账本 §11）
     实测每张卡都能正常打出（tools/orange_stone_m5_smoke.py 的卡池压力测试）。
     """
     import orange_stone as os
