@@ -95,7 +95,7 @@ def build_deck(ids: list[str]) -> list[str]:
 #: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释，2026-08 核对 68 处）：
 #: 语义与真实炉石有偏差，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且
 #: 语义一致的卡）。
-#: 权威清单在 orange-stone/docs/fidelity-debt.md（F4/F5 持续审计账本）——
+#: 权威清单在 orange-stone/docs/finished/fidelity-debt.md（F4/F5 持续审计账本，已归档）——
 #: 卡离开账本（实现 + F5 差分验证）后，删掉源码注释里的 "simplified" 字样，
 #: 本提取器就会自动把它放回卡池；注意失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
 DEBT_IDS: set[str] = {
