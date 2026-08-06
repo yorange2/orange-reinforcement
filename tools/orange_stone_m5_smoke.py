@@ -3,7 +3,7 @@
 验证口径（路线图 M5）：
 - 潜行：丛林豹上场后不能被攻击；攻击后破潜行（orange-stone #72）
 - 扰咒：精灵龙不能被法术指定为目标（orange-stone #73）
-- 全经典构筑池：321 张可用，随机套牌压力测试 200 局无异常
+- 全经典构筑池：321 张可用（保真债清偿后 391 张），随机套牌压力测试 200 局无异常
 - 特征 v7+：223 维（47 动作 + 176 局面，卡面文本块）
 
 用法：
@@ -65,7 +65,7 @@ def section_pool() -> None:
     print("=== 全经典构筑池 ===")
     pool = decks.full_pool()
     assert len(pool) > 300, f"构筑池只有 {len(pool)} 张，应该 >300"
-    print(f"  ✓ 构筑池 {len(pool)} 张（410 ALL_CARDS − 简化债 − 衍生物）")
+    print(f"  ✓ 构筑池 {len(pool)} 张（413 ALL_CARDS − 简化债 − 衍生物）")
 
     bad = []
     for s in range(200):
