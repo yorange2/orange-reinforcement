@@ -80,13 +80,13 @@ class TestGameFlow(unittest.TestCase):
         self.assertGreater(obs.opponent.hand_count, 0)  # 但手牌数可见
 
     def test_opening_shape_matches_simplified_hearthstone(self):
-        """后手 4 张 + 幸运币；先手第一回合不抽牌（官方规则）。"""
+        """先手 4 张（3 起手 + 第 1 回合抽牌）、后手 4 张 + 幸运币——官方规则。"""
         env = make_env()
         env.reset(seed=0)
         obs = env.observe()
-        self.assertEqual(obs.me.hand_count, 3)
+        self.assertEqual(obs.me.hand_count, 4)
         self.assertEqual(obs.opponent.hand_count, 5)  # 4 + 硬币
-        self.assertEqual(obs.me.deck_count, 27)
+        self.assertEqual(obs.me.deck_count, 26)
         self.assertEqual(obs.opponent.deck_count, 26)
 
     def test_game_reaches_an_end(self):
