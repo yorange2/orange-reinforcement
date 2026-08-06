@@ -2,7 +2,7 @@
 
 > 目标：把 `hearthstone/` 的炉石 AI 从「自研纯 Python 引擎 + 实验性 C++ RosettaStone 绑定」迁移到 **orange-stone（Rust 模拟器）** 上——让 `hearthstone/` 的训练、搜索、评测全部跑在真实规则引擎上，并吃下批量模拟与确定性回放的红利。
 >
-> 本文档记录 **orange-reinforcement 侧**的工作（环境打通、`hearthstone_os/` 模块、训练接入、批量、卡池、发布、决策点）；orange-stone 侧的接口/批量/保真工作见 `orange-stone/docs/rl-interface-roadmap.md`。
+> 本文档记录 **orange-reinforcement 侧**的工作（环境打通、`hearthstone_os/` 模块、训练接入、批量、卡池、发布、决策点）；orange-stone 侧的接口/批量/保真工作见 `orange-stone/docs/finished/rl-interface-roadmap.md`。
 >
 > 现状核对时间：2026-08-05（两个仓库的代码均已实地核实，下文差距清单按当前代码口径写）。
 
@@ -32,7 +32,7 @@
 
 ### 2.2 orange-stone 侧概览（RL 相关面）
 
-引擎侧的 RL 环境（`GameEnv`：单智能体 vs 内置 bot、168 维观测、可配置奖励）、PyO3 绑定（`reset/observation/legal_actions/step`）、批量模拟（`sim/batch.rs`）、内置 bot（Greedy/Smart）等现状细节见 `orange-stone/docs/rl-interface-roadmap.md` §2。
+引擎侧的 RL 环境（`GameEnv`：单智能体 vs 内置 bot、168 维观测、可配置奖励）、PyO3 绑定（`reset/observation/legal_actions/step`）、批量模拟（`sim/batch.rs`）、内置 bot（Greedy/Smart）等现状细节见 `orange-stone/docs/finished/rl-interface-roadmap.md` §2。
 
 ### 2.3 差距清单（G1~G10，按归属标注）
 
@@ -127,7 +127,7 @@
 - vanilla 口径重训（v7+）：vs rule **67.7%**、+搜索 **69.7%**（M3 基准 ±2pp 内保持）
 - 压力测试 200 局随机套牌全部正常完局；54 个测试全过
 
-**卡池执行 bug（已修）**：`decks.py::_load_debt_ids` 把简化注释记到上一张卡的 ID 上（PR #31 修——修前混进约 12 张简化卡、漏掉约 15 张干净卡，**M5 实测数字是修前卡池产出的，重训会漂移**）。修后提取器已提不到简化标记，`~/.cache/orange_stone_debt_ids.txt` 无需再维护。引擎侧保真债的清偿细节（W0~W7、differential 场景、账本归档）见 `orange-stone/docs/rl-interface-roadmap.md` §4 M5。
+**卡池执行 bug（已修）**：`decks.py::_load_debt_ids` 把简化注释记到上一张卡的 ID 上（PR #31 修——修前混进约 12 张简化卡、漏掉约 15 张干净卡，**M5 实测数字是修前卡池产出的，重训会漂移**）。修后提取器已提不到简化标记，`~/.cache/orange_stone_debt_ids.txt` 无需再维护。引擎侧保真债的清偿细节（W0~W7、differential 场景、账本归档）见 `orange-stone/docs/finished/rl-interface-roadmap.md` §4 M5。
 
 ### M6 — 发布（收尾）✅ 已完成（2026-08-06）
 
@@ -160,8 +160,8 @@
 
 ## 6. 相关文档
 
-- 引擎侧接口/批量/保真路线图：`orange-stone/docs/rl-interface-roadmap.md`（M1 接口补齐、M4 批量绑定、M5 保真债清偿，中英双语）
-- orange-stone 架构路线图：`orange-stone/docs/architecture-roadmap.md`（Phase 4 = RL 接口；里程碑 G/F 是 M1/M5 引擎侧工作的前置）
+- 引擎侧接口/批量/保真路线图：`orange-stone/docs/finished/rl-interface-roadmap.md`（M1 接口补齐、M4 批量绑定、M5 保真债清偿，中英双语）
+- orange-stone 架构路线图：`orange-stone/docs/finished/architecture-roadmap.md`（Phase 4 = RL 接口；里程碑 G/F 是 M1/M5 引擎侧工作的前置）
 - rosetta 经验（API 模板 + 三个教训）：`rosetta/README.md`
 - 特征/训练实验史（v5/v6、GAE、搜索）：`hearthstone/README.md`
 - 本模块战绩与基准表：`hearthstone_os/README.md`
