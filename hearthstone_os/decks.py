@@ -92,13 +92,14 @@ def build_deck(ids: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- M5 全卡池
 
-#: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释，2026-08 核对 68 张）：
+#: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释，2026-08 核对 68 处）：
 #: 语义与真实炉石有偏差，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且
 #: 语义一致的卡）。
+#: 权威清单在 orange-stone/docs/fidelity-debt.md（F4/F5 持续审计账本）——
+#: 卡离开账本（实现 + F5 差分验证）后，删掉源码注释里的 "simplified" 字样，
+#: 本提取器就会自动把它放回卡池；注意失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
 DEBT_IDS: set[str] = {
-    # 手动核对的关键几张（完整列表见 orange-stone 源码的 simplified 注释）：
-    # Tauren Warrior（enrage 简化成只有嘲讽）、Acidic Swamp Ooze（战吼拆武器
-    # 未实现？按引擎现状核对）等——具体以 orange-stone 的 F4/F5 审计为准。
+    # 示例：Tauren Warrior（enrage 简化成只有嘲讽）——完整列表以账本为准。
 }
 
 #: 全经典卡池（ALL_CARDS 410 张，含硬币/衍生物；过滤掉不干净的定义后由
@@ -125,9 +126,14 @@ def full_pool() -> list[str]:
 
 
 def _load_debt_ids() -> set[str]:
-    """从 orange-stone 源码提取简化债卡 ID（构建期核对一次，结果缓存）。"""
+    """从 orange-stone 源码提取简化债卡 ID（构建期核对一次，结果缓存）。
+
+    每处带 "simplified" 的文档注释都紧贴它所描述的卡牌常量（`///` 在
+    `pub const` 正上方），所以从注释行向后找**下一个** `pub const` 才是
+    正确的卡。之前按整块正则切分会把注释记到**上一张**卡头上（2026-08-06
+    审计发现：321 卡池里混进约 12 张简化卡、漏掉约 15 张干净卡）。
+    """
     import os as _os
-    import subprocess
 
     cache = _os.path.expanduser("~/.cache/orange_stone_debt_ids.txt")
     if _os.path.exists(cache):
@@ -139,13 +145,26 @@ def _load_debt_ids() -> set[str]:
     import glob as _glob
     import re as _re
     for f in _glob.glob(_os.path.join(src_dir, "classic_*.rs")):
-        src = open(f).read()
-        for block in _re.split(r"\n(?=pub const )", src):
-            if "simplified" in block.lower():
-                m = (_re.search(r'id: "([^"]+)"', block)
-                     or _re.search(r'vanilla!\("([^"]+)"', block))
+        lines = open(f).read().split("\n")
+        for i, line in enumerate(lines):
+            if "simplified" not in line or "///" not in line:
+                continue
+            # 注释正下方的常量定义：pub const NAME: CardDef = vanilla!(...) 或 = CardDef { ... }
+            m = None
+            for j in range(i + 1, min(i + 8, len(lines))):
+                m = _re.search(r'pub const \w+: CardDef = vanilla!\("([^"]+)"', lines[j])
                 if m:
-                    ids.add(m.group(1))
+                    break
+                m = _re.search(r'pub const \w+: CardDef = CardDef', lines[j])
+                if m:
+                    m = None
+                    for k in range(j, min(j + 10, len(lines))):
+                        m = _re.search(r'id: "([^"]+)"', lines[k])
+                        if m:
+                            break
+                    break
+            if m:
+                ids.add(m.group(1))
     try:
         _os.makedirs(_os.path.dirname(cache), exist_ok=True)
         open(cache, "w").write("\n".join(sorted(ids)))
