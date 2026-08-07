@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 import unittest
 
+import orange_stone as os
+
 from .. import decks
 from ..bots import GreedyBot, RandomBot
 from ..env import Env
@@ -17,6 +19,15 @@ class TestFullPool(unittest.TestCase):
         # 池里没有硬币和衍生物
         self.assertNotIn("GAME_005", pool)
         self.assertFalse(any(cid.endswith("t") for cid in pool))
+
+    def test_pool_open_flag_excludes_exactly_the_registry(self):
+        """D1 开关：include_pool_open=False 恰好剔除注册表里的开放池卡。"""
+        pool = decks.full_pool()
+        closed = decks.full_pool(include_pool_open=False)
+        open_ids = set(os.GameEnv.pool_open_card_ids())
+        self.assertEqual(len(pool) - len(closed), len(open_ids))
+        self.assertTrue(set(closed) <= set(pool))
+        self.assertFalse(open_ids & set(closed))
 
     def test_random_deck_is_30(self):
         deck = decks.random_deck(random.Random(0))

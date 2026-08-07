@@ -104,22 +104,31 @@ def build_deck(ids: list[str]) -> list[str]:
 
 #: 全经典卡池（ALL_CARDS 413 张，含硬币/衍生物；过滤掉不干净的定义后由
 #: `full_pool()` 给出可用的构筑池）。
-def full_pool() -> list[str]:
+def full_pool(include_pool_open: bool = True) -> list[str]:
     """M5 全经典构筑池：ALL_CARDS 里所有可入套牌的卡。
 
     过滤规则（路线图 §5 风险对策——训练卡池只用已实现且语义一致的卡）：
     - 去掉硬币（GAME_005）与纯衍生物（id 以 't' 结尾）
     - 去掉引擎侧有简化债注释的卡（`_load_debt_ids()` 由 orange-stone 源码核对；
       2026-08-07 战吼目标债清偿后为空集，见 orange-stone 账本 §12）
+    - 默认**保留**开放池卡（`include_pool_open=True`，roadmap D1 决策：池封闭时
+      收进心灵视界/思维窃取/心灵游戏/游学者周卓 4 张读对手牌的卡）；将来支持
+      第二个系列时把默认值翻成 False 即闭池，引擎不用动（开放池注册表见
+      orange-stone docs/pool-openness.md）
     实测每张卡都能正常打出（tools/orange_stone_m5_smoke.py 的卡池压力测试）。
     """
     import orange_stone as os
 
     ids = os.GameEnv.all_card_ids()
     debt = _load_debt_ids()
+    if include_pool_open:
+        pool_open: set[str] = set()
+    else:
+        pool_open = set(os.GameEnv.pool_open_card_ids())
     out = [
         cid for cid in ids
         if cid not in debt
+        and cid not in pool_open
         and not cid.endswith("t")
         and cid != "GAME_005"
     ]
