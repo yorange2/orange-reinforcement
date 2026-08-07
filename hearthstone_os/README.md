@@ -123,9 +123,29 @@ G9 子集镜像卡组（`decks.vanilla()`，15 种 × 2），胜率矩阵每对 
   `random_deck()` 随机组牌；200 局压力测试全部正常完局
 - **全卡池训练**（`train --pool full`，30k × 3 seed，随机组牌）：
 
-| 选手（全卡池口径） | vs random | vs greedy | vs rule |
+| 选手（全卡池口径，321 卡池） | vs random | vs greedy | vs rule |
 | --- | --- | --- | --- |
 | agent_full（PPO+GAE 3 万局 × 3 seed） | 97.5-99.0% | 70.0-74.5% | **62.5-66.0%** |
+
+### 2026-08-07 重训（orange-stone PR #108 之后，392 卡池）
+
+引擎侧 PR #108 修了 10 张卡的实现并**接通了此前完全没接的法术伤害管线**
+（`total_spell_damage` 零调用者——狗头人地卜师、达拉然法师、食人魔法师、大法师、
+血法师萨尔诺斯、青玉龙、玛里苟斯、远古法师此前实际都是白板）。这改变了含法术
+伤害随从卡组的实际强度，因此上表数字作废，同口径重跑：
+
+| 选手（全卡池口径，392 卡池） | vs random | vs greedy | vs rule |
+| --- | --- | --- | --- |
+| agent_full（PPO+GAE 3 万局 × 3 seed） | 100.0% | 73.2-78.8% | **62.3-68.8%** |
+
+- 口径与旧表完全一致（`--pool full --episodes 30000 --parallel 8`，
+  `--final-eval-games 400`，评测 seed 999，先后手轮换）
+- 对角线校准正常：`rule vs rule` = 50.0%，在 50% ± 2pp 内
+- **不要把这解读为「变强了」**：vs rule 的 seed 间跨度 6.5pp（62.3 / 65.8 / 68.8），
+  比旧表的 3.5pp 更宽，而两次的区间大面积重叠。卡池（321 → 392）和引擎语义同时
+  变了，这里能说的只有「同量级」
+- 3 万局 × 3 seed 在 M3 Pro 上约 6 分钟/seed（`--parallel 8`）
+- 旧权重保留为 `models/agent_full_s{0,1,2}.pre-pr108.pt`（模型目录被 gitignore）
 
 - **外部 SabberStone 对照**（orange-stone F5 补完）：dotnet 驱动镜像
   attack-trade 场景，两个模拟器结果一致（orange-stone #75）
