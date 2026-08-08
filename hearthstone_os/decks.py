@@ -94,27 +94,29 @@ def build_deck(ids: list[str]) -> list[str]:
 
 #: 引擎侧有记录简化债的卡（orange-stone 源码 "simplified" 注释）：语义与真实
 #: 炉石有偏差时，RL 训练卡池不用（路线图 §5 风险对策：只收已实现且语义一致的卡）。
-#: 权威清单在 orange-stone/docs/fidelity-debt.md（F4/F5 持续审计账本）。
-#: W0–W16（PR #79–#86、#97–#101、#104–#107）已全部清偿——战吼目标债
-#: （账本 §12）在 2026-08-07 由 battlecry-target-debt roadmap 收尾后，
-#: `_load_debt_ids()` 提取 0 个 ID，卡池 = 415 − 0 债 − 22 衍生物 − 硬币
-#: = 392（重编 wheel 后实测）。若未来新增简化卡，按账本的维护约定登记：
-#: 卡离开账本（实现 + F5 差分验证）后删掉源码注释里的 "simplified" 字样，
-#: 并失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
+#: 权威清单在 orange-stone/docs/finished/fidelity-debt.md（F4/F5 持续审计账本）。
+#: W0–W16（PR #79–#86、#97–#101、#104–#107）已全部清偿，战吼目标债（账本 §12）
+#: 在 2026-08-07 由 battlecry-target-debt roadmap 收尾后，`_load_debt_ids()` 提取
+#: 0 个 ID。核心系列全落地（core-set-roadmap W0~W8，PR #116–#128）后卡池 = 716 −
+#: 0 债 − 47 衍生物 − 硬币 = 668（含开放池 9 张；`include_pool_open=False` → 659，
+#: 重编 wheel 后实测，2026-08-08）。核心卡的简化以 `//!` 文件头登记（W6/W8 文件
+#: 头），未用逐卡 "simplified" 标记，故不进入债集合；若未来新增简化卡，按账本的
+#: 维护约定登记：卡离开账本（实现 + F5 差分验证）后删掉源码注释里的 "simplified"
+#: 字样，并失效 ~/.cache/orange_stone_debt_ids.txt 缓存。
 
-#: 全经典卡池（ALL_CARDS 413 张，含硬币/衍生物；过滤掉不干净的定义后由
-#: `full_pool()` 给出可用的构筑池）。
+#: 全卡池（ALL_CARDS 716 张，含硬币/衍生物；过滤掉不干净的定义后由
+#: `full_pool()` 给出可用的构筑池——经典 413 + 核心系列 270 张）。
 def full_pool(include_pool_open: bool = True) -> list[str]:
-    """M5 全经典构筑池：ALL_CARDS 里所有可入套牌的卡。
+    """全构筑池（经典 + 核心系列）：ALL_CARDS 里所有可入套牌的卡。
 
     过滤规则（路线图 §5 风险对策——训练卡池只用已实现且语义一致的卡）：
     - 去掉硬币（GAME_005）与纯衍生物（id 以 't' 结尾）
-    - 去掉引擎侧有简化债注释的卡（`_load_debt_ids()` 由 orange-stone 源码核对；
-      2026-08-07 战吼目标债清偿后为空集，见 orange-stone 账本 §12）
+    - 去掉引擎侧有简化债注释的卡（`_load_debt_ids()` 由 orange-stone 源码核对，
+      glob 覆盖 classic_*.rs 与 core_*.rs；2026-08-08 为空集）
     - 默认**保留**开放池卡（`include_pool_open=True`，roadmap D1 决策：池封闭时
-      收进心灵视界/思维窃取/心灵游戏/游学者周卓 4 张读对手牌的卡）；将来支持
-      第二个系列时把默认值翻成 False 即闭池，引擎不用动（开放池注册表见
-      orange-stone docs/pool-openness.md）
+      收进心灵视界/思维窃取/心灵游戏/游学者周卓等 9 张读对手牌的卡）；将来支持
+      更多系列时把默认值翻成 False 即闭池，引擎不用动（开放池注册表见
+      orange-stone docs/finished/pool-openness.md）
     实测每张卡都能正常打出（tools/orange_stone_m5_smoke.py 的卡池压力测试）。
     """
     import orange_stone as os
@@ -154,27 +156,30 @@ def _load_debt_ids() -> set[str]:
     ids: set[str] = set()
     import glob as _glob
     import re as _re
-    for f in _glob.glob(_os.path.join(src_dir, "classic_*.rs")):
-        lines = open(f).read().split("\n")
-        for i, line in enumerate(lines):
-            if "simplified" not in line or "///" not in line:
-                continue
-            # 注释正下方的常量定义：pub const NAME: CardDef = vanilla!(...) 或 = CardDef { ... }
-            m = None
-            for j in range(i + 1, min(i + 8, len(lines))):
-                m = _re.search(r'pub const \w+: CardDef = vanilla!\("([^"]+)"', lines[j])
+    # 经典 + 核心系列（core-set-roadmap D4：简化债扫描覆盖核心卡；核心卡的
+    # 简化登记在文件头 `//!`，逐卡 `///` 标记时才会被这里提取）
+    for pattern in ("classic_*.rs", "core_*.rs"):
+        for f in _glob.glob(_os.path.join(src_dir, pattern)):
+            lines = open(f).read().split("\n")
+            for i, line in enumerate(lines):
+                if "simplified" not in line or "///" not in line:
+                    continue
+                # 注释正下方的常量定义：pub const NAME: CardDef = vanilla!(...) 或 = CardDef { ... }
+                m = None
+                for j in range(i + 1, min(i + 8, len(lines))):
+                    m = _re.search(r'pub const \w+: CardDef = vanilla!\("([^"]+)"', lines[j])
+                    if m:
+                        break
+                    m = _re.search(r'pub const \w+: CardDef = CardDef', lines[j])
+                    if m:
+                        m = None
+                        for k in range(j, min(j + 10, len(lines))):
+                            m = _re.search(r'id: "([^"]+)"', lines[k])
+                            if m:
+                                break
+                        break
                 if m:
-                    break
-                m = _re.search(r'pub const \w+: CardDef = CardDef', lines[j])
-                if m:
-                    m = None
-                    for k in range(j, min(j + 10, len(lines))):
-                        m = _re.search(r'id: "([^"]+)"', lines[k])
-                        if m:
-                            break
-                    break
-            if m:
-                ids.add(m.group(1))
+                    ids.add(m.group(1))
     try:
         _os.makedirs(_os.path.dirname(cache), exist_ok=True)
         open(cache, "w").write("\n".join(sorted(ids)))
